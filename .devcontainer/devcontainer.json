@@ -1,5 +1,12 @@
+// Ensure you are using the latest version of Dev Containers, there was a bug in the previous version that caused the build to fail.
+
 {
-  "build": { "dockerfile": "Dockerfile" },
+  "build": { 
+    "dockerfile": "Dockerfile",
+    "args": {
+      "BUILDKIT_INLINE_CACHE": "0"
+    } 
+  },
 
   "customizations": {
     "vscode": {

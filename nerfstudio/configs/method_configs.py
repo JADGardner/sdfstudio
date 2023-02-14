@@ -908,7 +908,7 @@ method_configs["RENI-NeuS"] = Config(
             predict_visibility=True,
             visibility_loss_mult=0.5,
         ),
-        eval_latent_optimisation_source="image_half_render",
+        eval_latent_optimisation_source="image_half_inverse",
     ),
     optimizers={
         "proposal_networks": {

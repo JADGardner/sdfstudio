@@ -18,6 +18,7 @@ Implementation of VolSDF.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Tuple, Type
 
@@ -121,6 +122,7 @@ class RENINeuSModel(NeuSModel):
         **kwargs,
     ) -> None:
         self.num_eval_data = num_eval_data  # needed for fitting latent codes to envmaps for eval data
+        self.fitting_eval_latents = False
         super().__init__(
             config=config,
             scene_box=scene_box,
@@ -225,7 +227,10 @@ class RENINeuSModel(NeuSModel):
     def sample_and_forward_field(self, ray_bundle: RayBundle):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
 
-        reni = self.reni_field_train if self.training else self.reni_field_eval
+        if self.training:
+            reni = self.reni_field_train if not self.fitting_eval_latents else self.reni_field_eval
+        else:
+            reni = self.reni_field_eval
 
         field_outputs = self.field(ray_samples, return_alphas=True, reni_field=reni)
         weights, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(
@@ -387,12 +392,19 @@ class RENINeuSModel(NeuSModel):
 
     def fit_latent_codes_for_eval(self, datamanager, gt_source):
         """Fit evaluation latent codes to session envmaps so that illumination is correct."""
-        CONSOLE.print("Fitting RENI evaluation latent codes to envmaps...")
+        source = (
+            "environment maps"
+            if gt_source == "envmap"
+            else "sky from left image halves"
+            if gt_source == "image_half_sky"
+            else "left image halves"
+        )
+        CONSOLE.print(f"Optimising evaluation latent codes to {source}")
 
         # TODO Make configurable
         epochs = 30
-        opt = torch.optim.Adam(self.reni_field_eval.parameters(), lr=1e-1)
-        criterion = RENITestLoss(alpha=1e-9, beta=1e-1)
+        opt = torch.optim.Adam(self.reni_field_eval.parameters(), lr=1e-2)
+        reni_test_loss = RENITestLoss(alpha=1e-9, beta=1e-1)
 
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -401,28 +413,32 @@ class RENINeuSModel(NeuSModel):
             TimeRemainingColumn(),
             TextColumn("[blue]Loss: {task.fields[extra]}"),
         ) as progress:
-            task = progress.add_task("[green]Optimising eval latents...", total=epochs, extra="")
+            task = progress.add_task("[green]Optimising... ", total=epochs, extra="")
 
             # Setup data source
             if gt_source == "envmap":
-                dataloader = datamanager.eval_dataloader  # for loading batch of rays
                 W = datamanager.eval_dataset[0]["envmap"].shape[1]
                 directions = get_directions(W)  # [1, H*W, 3] - directions to sample the reni field
                 sineweight = get_sineweight(
                     W
                 )  # [1, H*W, 3] - sineweight compensation for the irregular sampling of the equirectangular image
             elif gt_source == "image_half_sky":
-                dataloader = datamanager.fixed_indices_eval_dataloader  # for loading full images
                 sky_colour = torch.tensor([70, 130, 180], dtype=torch.float32).to(self.device) / 255.0
             elif gt_source == "image_half_inverse":
-                dataloader = datamanager.eval_dataloader  # for loading batch of rays
-                # Set latent codes to zeros
+                # Re-initialise latents to zero
+                self.reni_field_eval.get_Z().data = torch.zeros_like(self.reni_field_eval.get_Z().data)
+                self.fitting_eval_latents = True
 
             # Fit latents
             for _ in range(epochs):
                 epoch_loss = 0.0
-                for ray_bundle, batch in dataloader:
-                    idx = batch["image_idx"]
+                for step in range(len(datamanager.eval_dataset)):
+
+                    # Lots of admin to get the data in the right format depending on task
+                    if gt_source in ["envmap"]:
+                        ray_bundle, batch = datamanager.next_eval(step)
+                    else:
+                        idx, ray_bundle, batch = datamanager.next_eval_image(step)
                     if gt_source == "envmap":
                         rgb = batch["envmap"].to(self.device)
                         rgb = rgb.unsqueeze(0)  # [B, H, W, 3]
@@ -453,27 +469,76 @@ class RENINeuSModel(NeuSModel):
                         )  # [1, num_sky_rays, 3]
                         S = torch.ones_like(rgb)  # [1, num_sky_rays, 3] # no need for sineweight compensation here
                     elif gt_source == "image_half_inverse":
-                        rgb = batch["image"].to(self.device)  # [num_eval_rays, 3]
-                        directions = ray_bundle.directions.to(self.device)  # [num_eval_rays, 3]
+                        rgb = batch["image"].to(self.device)  # [H, W, 3]
+                        rgb = rgb[:, : rgb.shape[1] // 2, :]  # [H, W//2, 3]
+                        rgb = rgb.reshape(
+                            -1, 3
+                        )  # [H*W, 3] # TODO: confirm this is row-major (internet seems to think so)
 
-                    # sample the reni field
-                    Z = self.reni_field_eval.get_Z()[idx, :, :]
-                    if len(Z.shape) == 2:
-                        Z = Z.unsqueeze(0)
+                        # rebuild a new RayBundle with the left half of the image
+                        ray_bundle.origins = ray_bundle.origins[
+                            :, : ray_bundle.origins.shape[1] // 2, :, :
+                        ]  # [H, W//2, 1, 3]
+                        ray_bundle.directions = ray_bundle.directions[
+                            :, : ray_bundle.directions.shape[1] // 2, :, :
+                        ]  # [H, W//2, 1, 3]
+                        ray_bundle.pixel_area = ray_bundle.pixel_area[
+                            :, : ray_bundle.pixel_area.shape[1] // 2, :, :
+                        ]  # [H, W//2, 1, 1]
+                        ray_bundle.directions_norm = ray_bundle.directions_norm[
+                            :, : ray_bundle.directions_norm.shape[1] // 2, :, :
+                        ]  # [H, W//2, 1, 1]
+                        ray_bundle.camera_indices = ray_bundle.camera_indices[
+                            :, : ray_bundle.camera_indices.shape[1] // 2, :, :
+                        ]  # [H, W//2, 1, 1]
 
-                    D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [B, num_rays, 3]
-                    model_output = self.reni_field_eval(Z, D)  # [B, num_rays, 3]
-                    model_output = self.reni_field_eval.unnormalise(model_output)  # undo reni scaling between -1 and 1
-                    model_output = sRGB(model_output)  # undo reni gamma correction
+                        # TODO handle nears and fars if they are defined and meta data and times.
+                        ray_bundle = ray_bundle.get_row_major_sliced_ray_bundle(0, len(ray_bundle))  # [H*W, N]
+                        # ray_bundle = ray_bundle.sample(512) # this doesn't work, not sure why TODO
+                        # sample N rays and build new ray_bundle
+                        indices = random.sample(range(len(ray_bundle)), k=256)
+                        ray_bundle.origins = ray_bundle.origins[indices, :]  # [N, 3]
+                        ray_bundle.directions = ray_bundle.directions[indices, :]  # [N, 3]
+                        ray_bundle.pixel_area = ray_bundle.pixel_area[indices, :]  # [N, 1]
+                        ray_bundle.directions_norm = ray_bundle.directions_norm[indices, :]  # [N, 1]
+                        ray_bundle.camera_indices = ray_bundle.camera_indices[indices, :]  # [N, 1]
+
+                        # also get rgb values for the sampled rays
+                        rgb = rgb[indices, :]  # [N, 3]
+
+                    # Get model output
+                    if gt_source in ["envmap", "image_half_sky"]:
+                        # sample the reni field
+                        Z = self.reni_field_eval.get_Z()[idx, :, :]
+                        if len(Z.shape) == 2:
+                            Z = Z.unsqueeze(0)
+
+                        D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [B, num_rays, 3]
+                        model_output = self.reni_field_eval(Z, D)  # [B, num_rays, 3]
+                        model_output = self.reni_field_eval.unnormalise(
+                            model_output
+                        )  # undo reni scaling between -1 and 1
+                        model_output = sRGB(model_output)  # undo reni gamma correction
+                    else:
+                        outputs = self.forward(ray_bundle=ray_bundle)
+                        model_output = outputs["rgb"]  # [N, 3]
+
                     opt.zero_grad()
-                    loss, _, _, _ = criterion(model_output, rgb, S, Z)
+                    if gt_source in ["envmap", "image_half_sky"]:
+                        loss, _, _, _ = reni_test_loss(model_output, rgb, S, Z)
+                    else:
+                        loss = (
+                            self.rgb_loss(rgb, model_output) + 1e-9 * torch.pow(self.reni_field_eval.get_Z(), 2).sum()
+                        )
                     epoch_loss += loss.item()
                     loss.backward()
                     opt.step()
 
-                progress.update(task, extra=f"{epoch_loss:.4f}")
+                progress.update(task, advance=1, extra=f"{epoch_loss:.4f}")
 
         if gt_source in ["envmap", "image_half"]:
             self.reni_field_eval.mu.requires_grad = (
                 False  # We no longer need to optimise latent codes as done prior to start of training
             )
+        # no longer fitting latents
+        self.fitting_eval_latents = False

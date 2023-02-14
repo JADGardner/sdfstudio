@@ -120,8 +120,8 @@ class FitEvalLatentsPipeline(Pipeline):
             dist.barrier(device_ids=[local_rank])
 
         # model must implement this function
-        if self.config.eval_latent_optimisation_source in ["envmap", "image_half", "image_half_inverse"]:
-            self.model.fit_latent_codes_for_eval(self.datamanager, self.conig.eval_latent_optimisation_source)
+        if self.config.eval_latent_optimisation_source in ["envmap", "image_half"]:
+            self.model.fit_latent_codes_for_eval(self.datamanager, self.config.eval_latent_optimisation_source)
 
     @property
     def device(self):
@@ -172,7 +172,7 @@ class FitEvalLatentsPipeline(Pipeline):
         """
         # If we are optimising per eval image latents then we need to do that first
         if self.config.eval_latent_optimisation_source == "image_half_inverse":
-            self.model.fit_latent_codes_for_eval(self.datamanager, self.conig.eval_latent_optimisation_source)
+            self.model.fit_latent_codes_for_eval(self.datamanager, self.config.eval_latent_optimisation_source)
         self.eval()
         ray_bundle, batch = self.datamanager.next_eval(step)
         model_outputs = self.model(ray_bundle)
@@ -189,6 +189,8 @@ class FitEvalLatentsPipeline(Pipeline):
         Args:
             step: current iteration step
         """
+        if self.config.eval_latent_optimisation_source == "image_half_inverse":
+            self.model.fit_latent_codes_for_eval(self.datamanager, self.config.eval_latent_optimisation_source)
         self.eval()
         image_idx, camera_ray_bundle, batch = self.datamanager.next_eval_image(step)
         outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
