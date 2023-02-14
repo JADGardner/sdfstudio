@@ -94,22 +94,27 @@ def collate_image_dataset_batch_list(batch: Dict, num_rays_per_batch: int, keep_
     all_indices = []
     all_images = []
     all_fg_masks = []
+    all_semantic_masks = []
 
     if "mask" in batch:
         num_rays_in_batch = num_rays_per_batch // num_images
         for i in range(num_images):
             if i == num_images - 1:
                 num_rays_in_batch = num_rays_per_batch - (num_images - 1) * num_rays_in_batch
-            # nonzero_indices = torch.nonzero(batch["mask"][i][..., 0], as_tuple=False)
-            nonzero_indices = batch["mask"][i]
+            nonzero_indices = torch.nonzero(
+                batch["mask"][i], as_tuple=False
+            )  # (james: this was commented out in the original code)
+            # nonzero_indices = batch["mask"][i]  # [H, W]
 
-            chosen_indices = random.sample(range(len(nonzero_indices)), k=num_rays_in_batch)
+            chosen_indices = random.sample(range(len(nonzero_indices)), k=num_rays_in_batch)  #
             indices = nonzero_indices[chosen_indices]
             indices = torch.cat([torch.full((num_rays_in_batch, 1), i, device=device), indices], dim=-1)
             all_indices.append(indices)
             all_images.append(batch["image"][i][indices[:, 1], indices[:, 2]])
             if "fg_mask" in batch:
                 all_fg_masks.append(batch["fg_mask"][i][indices[:, 1], indices[:, 2]])
+            if "semantic_mask" in batch:
+                all_semantic_masks.append(batch["semantic_mask"][i][indices[:, 1], indices[:, 2]])
 
     else:
         num_rays_in_batch = num_rays_per_batch // num_images
@@ -126,6 +131,8 @@ def collate_image_dataset_batch_list(batch: Dict, num_rays_per_batch: int, keep_
             all_images.append(batch["image"][i][indices[:, 1], indices[:, 2]])
             if "fg_mask" in batch:
                 all_fg_masks.append(batch["fg_mask"][i][indices[:, 1], indices[:, 2]])
+            if "semantic_mask" in batch:
+                all_semantic_masks.append(batch["semantic_mask"][i][indices[:, 1], indices[:, 2]])
 
     indices = torch.cat(all_indices, dim=0)
 
@@ -137,13 +144,18 @@ def collate_image_dataset_batch_list(batch: Dict, num_rays_per_batch: int, keep_
         and key != "image"
         and key != "mask"
         and key != "fg_mask"
+        and key != "semantic_mask"
         and key != "sparse_pts"
+        and key != "session"
+        and key != "envmap"
+        and key != "envmap_semantics"
+        and key != "envmap_fg_mask"
         and value is not None
     }
 
     collated_batch["image"] = torch.cat(all_images, dim=0)
     if len(all_fg_masks) > 0:
-        collated_batch["fg_mask"] = torch.cat(all_fg_masks, dim=0)
+        collated_batch["fg_mask"] = torch.cat(all_fg_masks, dim=0).unsqueeze(1)
 
     if "sparse_pts" in batch:
         rand_idx = random.randint(0, num_images - 1)
@@ -157,6 +169,17 @@ def collate_image_dataset_batch_list(batch: Dict, num_rays_per_batch: int, keep_
 
     if keep_full_image:
         collated_batch["full_image"] = batch["image"]
+        if "semantic_mask" in batch:
+            collated_batch["full_semantic_mask"] = batch["semantic_mask"]
+
+    if "session" in batch:
+        collated_batch["session"] = batch["session"]
+        collated_batch["envmap"] = batch["envmap"]
+        collated_batch["envmap_semantics"] = batch["envmap_semantics"]
+        collated_batch["envmap_fg_mask"] = batch["envmap_fg_mask"]
+
+    if len(all_semantic_masks) > 0:
+        collated_batch["semantic_mask"] = torch.cat(all_semantic_masks, dim=0)
 
     return collated_batch
 
@@ -200,6 +223,8 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
             # TODO clean up
             if "fg_mask" in image_batch:
                 image_batch["fg_mask"] = image_batch["fg_mask"].images
+            if "semantic_mask" in image_batch:
+                image_batch["semantic_mask"] = image_batch["semantic_mask"].images
             if "sparse_pts" in image_batch:
                 image_batch["sparse_pts"] = image_batch["sparse_pts"].images
             pixel_batch = collate_image_dataset_batch_list(

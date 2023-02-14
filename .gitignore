@@ -124,11 +124,13 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.devcontainer/*.sif
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
 
 # Spyder project settings
 .spyderproject
@@ -168,6 +170,7 @@ renders/
 outputs
 vis/
 meshes/
+checkpoints/
 gradio_cached_examples/
 # tensorboard log files
 events.out.*
@@ -196,3 +199,5 @@ camera_paths/
 vis_results/
 W/
 *.ply
+
+colmap/stjacob/

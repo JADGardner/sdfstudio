@@ -99,3 +99,15 @@ def apply_boolean_colormap(
     colored_image[image[..., 0], :] = true_color
     colored_image[~image[..., 0], :] = false_color
     return colored_image
+
+
+def sRGB(color):
+    # q = torch.quantile(color, 0.98, dim=(1))
+    # color = color / q.unsqueeze(1)
+    color = torch.where(
+        color <= 0.0031308,
+        12.92 * color,
+        1.055 * torch.pow(torch.abs(color), 1 / 2.4) - 0.055,
+    )
+    color = torch.clamp(color, 0.0, 1.0)
+    return color

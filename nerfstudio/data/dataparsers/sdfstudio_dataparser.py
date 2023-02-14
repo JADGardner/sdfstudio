@@ -241,9 +241,9 @@ class SDFStudio(DataParser):
             if self.config.include_foreground_mask:
                 assert meta["has_foreground_mask"]
                 # load foreground mask
-                foreground_mask = np.array(Image.open(self.config.data / frame["foreground_mask"]), dtype="uint8")
-                foreground_mask = foreground_mask[..., :1]
-                foreground_mask_images.append(torch.from_numpy(foreground_mask).float() / 255.0)
+                foreground_mask = np.array(Image.open(self.config.data / frame["foreground_mask"]), dtype="uint8") # HxWx3
+                foreground_mask = foreground_mask[..., :1] # HxWx1
+                foreground_mask_images.append(torch.from_numpy(foreground_mask).float() / 255.0) # HxWx1 in [0, 1]
 
             if self.config.include_sfm_points:
                 assert meta["has_sparse_sfm_points"]

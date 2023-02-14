@@ -150,6 +150,15 @@ export function RenderControls() {
         Slow: () =>
           setControls({ target_train_util: 0.1, max_resolution: 2048 }),
       }),
+      // camera_selection
+      camera_options: {
+        label: 'Camera Options',
+        options: [...new Set(cameraOptions)],
+        value: cameraOptions,
+        onChange: (v) => {
+          set_camera_selection(v);
+        },
+      },
       // output_options
       output_options: {
         label: 'Output Render',

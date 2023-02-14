@@ -40,6 +40,7 @@ from nerfstudio.data.datamanagers.variable_res_datamanager import (
 from nerfstudio.data.dataparsers.blender_dataparser import BlenderDataParserConfig
 from nerfstudio.data.dataparsers.dnerf_dataparser import DNeRFDataParserConfig
 from nerfstudio.data.dataparsers.friends_dataparser import FriendsDataParserConfig
+from nerfstudio.data.dataparsers.nerfosr_dataparser import NeRFOSRDataParserConfig
 from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataParserConfig
 from nerfstudio.data.dataparsers.phototourism_dataparser import (
     PhototourismDataParserConfig,
@@ -52,6 +53,7 @@ from nerfstudio.engine.schedulers import (
     NeuSSchedulerConfig,
 )
 from nerfstudio.field_components.temporal_distortions import TemporalDistortionKind
+from nerfstudio.fields.reni_sdf_albedo_field import RENISDFAlbedoFieldConfig
 from nerfstudio.fields.sdf_field import SDFFieldConfig
 from nerfstudio.models.dto import DtoOModelConfig
 from nerfstudio.models.instant_ngp import InstantNGPModelConfig
@@ -61,6 +63,8 @@ from nerfstudio.models.neuralreconW import NeuralReconWModelConfig
 from nerfstudio.models.neus import NeuSModelConfig
 from nerfstudio.models.neus_acc import NeuSAccModelConfig
 from nerfstudio.models.neus_facto import NeuSFactoModelConfig
+from nerfstudio.models.reni_nerfacto import RENINerfactoModelConfig
+from nerfstudio.models.reni_neus import RENINeuSModelConfig
 from nerfstudio.models.semantic_nerfw import SemanticNerfWModelConfig
 from nerfstudio.models.tensorf import TensoRFModelConfig
 from nerfstudio.models.unisurf import UniSurfModelConfig
@@ -71,6 +75,7 @@ from nerfstudio.pipelines.base_pipeline import (
     VanillaPipelineConfig,
 )
 from nerfstudio.pipelines.dynamic_batch import DynamicBatchPipelineConfig
+from nerfstudio.pipelines.fit_eval_latents_pipeline import FitEvalLatentsPipelineConfig
 
 method_configs: Dict[str, Config] = {}
 descriptions = {
@@ -96,6 +101,8 @@ descriptions = {
     "neus-acc": "Implementation of NeuS with empty space skipping.",
     "neus-facto": "Implementation of NeuS similar to nerfacto where proposal sampler is used.",
     "neus-facto-bigmlp": "NeuS-facto with big MLP, it is used in training heritage data with 8 gpus",
+    "RENI-NeuS": "NeuS-facto with illumination, albedo and shadow disentanglement",
+    "RENI-Nerfacto": "Nerfacto with illumination, albedo and shadow disentanglement",
 }
 
 method_configs["neus-facto"] = Config(
@@ -805,6 +812,117 @@ method_configs["phototourism"] = Config(
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             "scheduler": None,
+        },
+    },
+    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    vis="viewer",
+)
+
+method_configs["RENI-Nerfacto"] = Config(
+    method_name="RENI-Nerfacto",
+    trainer=TrainerConfig(
+        steps_per_eval_batch=5000, steps_per_save=2000, max_num_iterations=30000, mixed_precision=True
+    ),
+    pipeline=FitEvalLatentsPipelineConfig(
+        datamanager=VanillaDataManagerConfig(
+            dataparser=NerfstudioDataParserConfig(),
+            train_num_rays_per_batch=1024,
+            eval_num_rays_per_batch=1024,
+            camera_optimizer=CameraOptimizerConfig(
+                mode="off", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+            ),
+        ),
+        model=RENINerfactoModelConfig(
+            eval_num_rays_per_chunk=1 << 15,
+            reni_path="checkpoints/reni_pretrained_weights/latent_dim_36_net_5_256_vad_cbc_tanh_hdr/version_0/checkpoints/fit_decoder_epoch=1579.ckpt",
+            icosphere_order=3,
+            fg_mask_loss_mult=1.0,
+            reni_loss_weight=1.0,
+            far_plane=20.0,
+            predict_visibility=True,
+            visibility_loss_mult=1.0,
+            # reni_cosine_loss_weight=0.1,
+            # reni_prior_loss_weight=0.1,
+            # num_nerf_samples_per_ray=12,
+            # predict_normals=False,
+        ),
+    ),
+    optimizers={
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
+            "scheduler": MultiStepSchedulerConfig(max_steps=300000),
+            # "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.05, max_steps=300000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
+            "scheduler": MultiStepSchedulerConfig(max_steps=300000),
+            # "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.05, max_steps=300000),
+        },
+        "reni_field": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": SchedulerConfig(lr_final=1e-3, max_steps=300000),
+        },
+    },
+    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    vis="viewer",
+)
+
+method_configs["RENI-NeuS"] = Config(
+    method_name="RENI-NeuS",
+    trainer=TrainerConfig(
+        steps_per_eval_image=1000,
+        steps_per_eval_batch=5000,
+        steps_per_save=20000,
+        steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
+        max_num_iterations=20001,
+        mixed_precision=False,
+    ),
+    pipeline=FitEvalLatentsPipelineConfig(
+        datamanager=VanillaDataManagerConfig(
+            dataparser=NeRFOSRDataParserConfig(),
+            train_num_rays_per_batch=512,
+            eval_num_rays_per_batch=512,
+            camera_optimizer=CameraOptimizerConfig(
+                mode="off", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
+            ),
+        ),
+        model=RENINeuSModelConfig(
+            sdf_field=RENISDFAlbedoFieldConfig(
+                use_grid_feature=True,
+                num_layers=5,
+                num_layers_color=5,
+                hidden_dim=256,
+                bias=0.5,
+                beta_init=0.3,
+                use_appearance_embedding=False,
+                icosphere_order=2,
+                inside_outside=False,  # This is for outdoor scenes
+                use_visibility=True,
+            ),
+            eval_num_rays_per_chunk=512,
+            fg_mask_loss_mult=1.0,
+            reni_loss_weight=1.0,
+            reni_path="checkpoints/reni_pretrained_weights/latent_dim_36_net_5_256_vad_cbc_tanh_hdr/version_0/checkpoints/fit_decoder_epoch=1579.ckpt",
+            near_plane=0.05,
+            far_plane=100.0,
+            predict_visibility=True,
+            visibility_loss_mult=0.5,
+        ),
+        eval_latent_optimisation_source="image_half_render",
+    ),
+    optimizers={
+        "proposal_networks": {
+            "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
+            "scheduler": MultiStepSchedulerConfig(max_steps=20000),
+        },
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
+            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.05, max_steps=20000),
+        },
+        "field_background": {  # RENI in this case
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": SchedulerConfig(lr_final=1e-3, max_steps=20000),
+            # "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.05, max_steps=20000),
         },
     },
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),

@@ -178,6 +178,7 @@ class GeneralizedDataset(InputDataset):
         image = self.get_image(image_idx)
         data = {"image_idx": image_idx}
         data["image"] = BasicImages([image])
+        # data["image"] = image
         for _, data_func_dict in self._dataparser_outputs.additional_inputs.items():
             assert "func" in data_func_dict, "Missing function to process data: specify `func` in `additional_inputs`"
             func = data_func_dict["func"]
@@ -186,6 +187,7 @@ class GeneralizedDataset(InputDataset):
         if self.has_masks:
             mask_filepath = self._dataparser_outputs.mask_filenames[image_idx]
             data["mask"] = BasicImages([get_image_mask_tensor_from_path(filepath=mask_filepath)])
+            # data["mask"] = get_image_mask_tensor_from_path(filepath=mask_filepath)
         metadata = self.get_metadata(data)
         data.update(metadata)
         return data

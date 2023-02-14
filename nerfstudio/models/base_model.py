@@ -185,7 +185,11 @@ class Model(nn.Module):
             if not torch.is_tensor(outputs_list[0]):
                 # TODO: handle lists of tensors as well
                 continue
-            outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
+            try:
+                outputs[output_name] = torch.cat(outputs_list).view(image_height, image_width, -1)  # type: ignore
+            except RuntimeError:
+                print("Error in concatenating outputs")
+                print(output_name)
         return outputs
 
     @abstractmethod

@@ -28,8 +28,8 @@ from typing_extensions import Literal
 from nerfstudio.process_data.process_data_utils import CameraModel
 
 try:
-    import pycolmap
-    from hloc import (
+    import pycolmap # type: ignore
+    from hloc import ( # type: ignore
         extract_features,
         match_features,
         pairs_from_exhaustive,
