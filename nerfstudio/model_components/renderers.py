@@ -36,6 +36,7 @@ from torchtyping import TensorType
 from typing_extensions import Literal
 
 from nerfstudio.cameras.rays import RaySamples
+from nerfstudio.utils.colormaps import sRGB
 from nerfstudio.utils.math import components_from_spherical_harmonics
 
 
@@ -112,6 +113,150 @@ class RGBRenderer(nn.Module):
 
         rgb = self.combine_rgb(
             rgb, weights, background_color=self.background_color, ray_indices=ray_indices, num_rays=num_rays
+        )
+        if not self.training:
+            torch.clamp_(rgb, min=0.0, max=1.0)
+        return rgb
+
+
+class RGBLambertianRendererWithVisibility(nn.Module):
+    """Lambertian renderer with visibility.
+
+    Args:
+        background_color: Background color provided externally.
+    """
+
+    @classmethod
+    def render_and_combine(
+        cls,
+        albedos: TensorType["bs":..., "num_samples", 3],
+        normals: TensorType["bs":..., "num_samples", 3],
+        light_directions: TensorType["bs":..., "num_samples", 3],
+        light_colors: TensorType["bs":..., "num_samples", 3],
+        visibility: TensorType["bs":..., "num_samples", 1],
+        weights: TensorType["bs":..., "num_samples", 1],
+        background_color: TensorType["bs":..., "num_samples", 3],
+        ray_indices: Optional[TensorType["num_samples"]] = None,
+        num_rays: Optional[int] = None,
+    ) -> TensorType["bs":..., 3]:
+        """Composite samples along ray and render color image
+
+        Args:
+            albedo: Albedo for each sample
+            normal: Normal for each sample
+            light_directions: Light directions for each sample
+            light_colors: Light colors for each sample
+            visibility: Visibility of illumination for each sample
+            weights: Weights for each sample
+            background_color: Background color as RGB.
+            ray_indices: Ray index for each sample, used when samples are packed.
+            num_rays: Number of rays, used when samples are packed.
+
+        Returns:
+            Outputs rgb values.
+        """
+        max_chunk_size = 200000
+
+        if albedos.shape[0] > max_chunk_size:
+            num_chunks = albedos.shape[0] // max_chunk_size + 1
+
+            color_chunks = []
+            for i in range(num_chunks):
+                albedos_chunk = albedos[i * max_chunk_size : (i + 1) * max_chunk_size]
+                normals_chunk = normals[i * max_chunk_size : (i + 1) * max_chunk_size]
+                light_directions_chunk = light_directions[i * max_chunk_size : (i + 1) * max_chunk_size]
+                light_colours_chunk = light_colors[i * max_chunk_size : (i + 1) * max_chunk_size]
+
+                dot_prod = torch.einsum(
+                    "bi,bji->bj", normals_chunk, light_directions_chunk
+                )  # [num_rays * samples_per_ray, num_reni_directions]
+
+                dot_prod = torch.clamp(dot_prod, 0, 1)
+
+                if visibility is not None:
+                    visibility_chunk = visibility[i * max_chunk_size : (i + 1) * max_chunk_size]
+                    dot_prod = dot_prod * visibility_chunk
+
+                color_chunk = torch.einsum(
+                    "bi,bj,bji->bi", albedos_chunk, dot_prod, light_colours_chunk
+                )  # [num_rays * samples_per_ray, 3]
+
+                color_chunks.append(color_chunk)
+
+            color = torch.cat(color_chunks, dim=0)
+
+        else:
+            # compute dot product between normals [num_rays * samples_per_ray, 3] and light directions [num_rays * samples_per_ray, num_reni_directions, 3]
+            dot_prod = torch.einsum(
+                "bi,bji->bj", normals, light_directions
+            )  # [num_rays * samples_per_ray, num_reni_directions]
+
+            # clamp dot product values to be between 0 and 1
+            dot_prod = torch.clamp(dot_prod, 0, 1)
+
+            if visibility is not None:
+                # Apply the visibility mask to the dot product
+                dot_prod = dot_prod * visibility
+
+            # compute final color by multiplying dot product with albedo color and light color
+            radiance = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colors)  # [num_rays * samples_per_ray, 3]
+
+        radiance = sRGB(color)
+
+        if ray_indices is not None and num_rays is not None:
+            # Necessary for packed samples from volumetric ray sampler
+            if background_color == "last_sample":
+                raise NotImplementedError("Background color 'last_sample' not implemented for packed samples.")
+            comp_rgb = nerfacc.accumulate_along_rays(weights, ray_indices, radiance, num_rays)
+            accumulated_weight = nerfacc.accumulate_along_rays(weights, ray_indices, None, num_rays)
+        else:
+            comp_rgb = torch.sum(weights * radiance, dim=-2)
+            accumulated_weight = torch.sum(weights, dim=-2)
+
+        assert isinstance(background_color, torch.Tensor)
+        comp_rgb = comp_rgb + background_color.to(weights.device) * (1.0 - accumulated_weight)
+
+        return comp_rgb
+
+    def forward(
+        self,
+        albedos: TensorType["bs":..., "num_samples", 3],
+        normals: TensorType["bs":..., "num_samples", 3],
+        light_directions: TensorType["bs":..., "num_samples", 3],
+        light_colors: TensorType["bs":..., "num_samples", 3],
+        visibility: TensorType["bs":..., "num_samples", 1],
+        background_color: TensorType["bs":..., "num_samples", 3],
+        weights: TensorType["bs":..., "num_samples", 1],
+        ray_indices: Optional[TensorType["num_samples"]] = None,
+        num_rays: Optional[int] = None,
+    ) -> TensorType["bs":..., 3]:
+        """Composite samples along ray and render color image
+
+        Args:
+            albedos: Albedo for each sample
+            normals: Normal for each sample
+            light_directions: Light directions for each sample
+            light_colors: Light colors for each sample
+            visibility: Visibility of illumination for each sample
+            background_color: Background color as RGB
+            weights: Weights for each sample
+            ray_indices: Ray index for each sample, used when samples are packed.
+            num_rays: Number of rays, used when samples are packed.
+
+        Returns:
+            Outputs of rgb values.
+        """
+
+        rgb = self.render_and_combine(
+            albedos,
+            normals,
+            light_directions,
+            light_colors,
+            visibility,
+            weights,
+            background_color=background_color,
+            ray_indices=ray_indices,
+            num_rays=num_rays,
         )
         if not self.training:
             torch.clamp_(rgb, min=0.0, max=1.0)

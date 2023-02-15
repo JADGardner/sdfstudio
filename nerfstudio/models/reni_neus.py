@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Tuple, Type
+from typing import Dict, List, Tuple, Type
 
 import numpy as np
 import torch
@@ -399,7 +399,7 @@ class RENINeuSModel(NeuSModel):
             if gt_source == "image_half_sky"
             else "left image halves"
         )
-        CONSOLE.print(f"Optimising evaluation latent codes to {source}")
+        CONSOLE.print(f"Optimising evaluation latent codes to {source}:")
 
         # TODO Make configurable
         epochs = 30
