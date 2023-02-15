@@ -20,34 +20,10 @@ from abc import abstractmethod
 from dataclasses import dataclass, field
 from typing import Literal, Type
 
-import icosphere
 import torch
 from torch import nn
 
 from nerfstudio.configs.base_config import InstantiateConfig
-
-
-class IcosahedronSampler(nn.Module):
-    """For sampling directions from an icosahedron."""
-
-    def __init__(self, icosphere_order: int = 2):
-        super().__init__()
-        self.icosphere_order = icosphere_order
-
-        vertices, _ = icosphere.icosphere(self.icosphere_order)
-        self.directions = torch.from_numpy(vertices).float()  # [N, 3], # Z is up
-
-    def forward(self, positions):
-        """Returns directions for each position.
-
-        Args:
-            positions: [num_rays, samples_per_ray, 3]
-
-        Returns:
-            directions: [num_rays, samples_per_ray, num_directions, 3]
-        """
-
-        return self.directions[None, None, :, :].expand(positions.shape[0], positions.shape[1], -1, -1)
 
 
 # Field related configs
@@ -64,35 +40,11 @@ class IlluminationField(nn.Module):
 
     def __init__(
         self,
-        sampling_method: Literal["icosphere", "other", "None"] = "icosphere",
-        icosphere_order: int = 2,
     ) -> None:
         super().__init__()
-        self.sampling_method = sampling_method
-        self.icosphere_order = icosphere_order
-
-        self.setup_sampler()
-
-    def setup_sampler(self):
-        """Initializes the sampler.
-
-        Raises:
-            NotImplementedError: Choosen sampling method is not implemented.
-        """
-        if self.sampling_method == "icosphere":
-            self.sampler = IcosahedronSampler(self.icosphere_order)
-        elif self.sampling_method == "None":
-            self.sampler = None
-        else:
-            raise NotImplementedError
-
-    def get_directions(self, positions):
-        """Gets directions for each position."""
-
-        return self.sampler(positions)
 
     @abstractmethod
-    def get_outputs(self, unique_indices, inverse_indices, directions):
+    def get_outputs(self, unique_indices, inverse_indices, directions, illumination_type):
         """Computes and returns the colors. Returns output field values.
 
         Args:
@@ -101,16 +53,28 @@ class IlluminationField(nn.Module):
             directions: [rays_per_batch, samples_per_ray, num_directions, 3]
         """
 
-    def forward(self, camera_indices, positions, directions=None):
-        """Selects directions and evaluates the field for each camera.
+    @abstractmethod
+    def reset_latents(self):
+        """Resets the latents of the field."""
+
+    @abstractmethod
+    def get_latents(self):
+        """Returns the latents of the field."""
+
+    @abstractmethod
+    def set_no_grad(self):
+        """Sets the latents of the field to no_grad."""
+
+    def forward(self, camera_indices, positions, directions, illumination_type=Literal["background", "illumination"]):
+        """Evaluates illumination field for cameras and directions.
 
         Args:
             camera_indicies: [rays_per_batch, samples_per_ray]
             positions: [rays_per_batch, samples_per_ray, 3]
             directions: [rays_per_batch, samples_per_ray, num_directions, 3]
         """
-        if directions is None:
-            directions = self.get_directions(positions)  # [rays_per_batch, samples_per_ray, num_directions, 3]
         unique_indices, inverse_indices = torch.unique(camera_indices, return_inverse=True)
-        illumination_colours, illumination_directions = self.get_outputs(unique_indices, inverse_indices, directions)
+        illumination_colours, illumination_directions = self.get_outputs(
+            unique_indices, inverse_indices, directions, illumination_type
+        )
         return illumination_colours, illumination_directions

@@ -895,13 +895,12 @@ method_configs["RENI-NeuS"] = Config(
                 bias=0.5,
                 beta_init=0.3,
                 use_appearance_embedding=False,
-                icosphere_order=2,
                 inside_outside=False,  # This is for outdoor scenes
                 use_visibility=True,
             ),
             eval_num_rays_per_chunk=512,
             fg_mask_loss_mult=1.0,
-            reni_loss_weight=1.0,
+            reni_loss_mult=1.0,
             reni_path="checkpoints/reni_pretrained_weights/latent_dim_36_net_5_256_vad_cbc_tanh_hdr/version_0/checkpoints/fit_decoder_epoch=1579.ckpt",
             near_plane=0.05,
             far_plane=100.0,
@@ -909,15 +908,17 @@ method_configs["RENI-NeuS"] = Config(
             visibility_loss_mult=0.5,
         ),
         eval_latent_optimisation_source="image_half_inverse",
+        eval_latent_optimisation_epochs=50,
+        eval_latent_optimisation_lr=1e-2,
     ),
     optimizers={
         "proposal_networks": {
             "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-            "scheduler": MultiStepSchedulerConfig(max_steps=20000),
+            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=2.0, max_steps=20000),
         },
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
-            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.05, max_steps=20000),
+            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=2.0, max_steps=20000),
         },
         "field_background": {  # RENI in this case
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),

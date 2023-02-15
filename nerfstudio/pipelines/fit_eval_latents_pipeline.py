@@ -61,6 +61,10 @@ class FitEvalLatentsPipelineConfig(VanillaPipelineConfig):
         "None", "envmap", "image_half_sky", "image_half_inverse"
     ] = "image_half_inverse"
     """Source for latent optimisation during eval"""
+    eval_latent_optimisation_epochs: int = 100
+    """Number of epochs to optimise latent during eval"""
+    eval_latent_optimisation_lr: float = 0.1
+    """Learning rate for latent optimisation during eval"""
 
 
 class FitEvalLatentsPipeline(Pipeline):
@@ -121,7 +125,12 @@ class FitEvalLatentsPipeline(Pipeline):
 
         # model must implement this function
         if self.config.eval_latent_optimisation_source in ["envmap", "image_half"]:
-            self.model.fit_latent_codes_for_eval(self.datamanager, self.config.eval_latent_optimisation_source)
+            self.model.fit_latent_codes_for_eval(
+                datamanager=self.datamanager,
+                gt_source=self.config.eval_latent_optimisation_source,
+                epochs=self.config.eval_latent_optimisation_epochs,
+                learning_rate=self.config.eval_latent_optimisation_lr,
+            )
 
     @property
     def device(self):
@@ -172,7 +181,12 @@ class FitEvalLatentsPipeline(Pipeline):
         """
         # If we are optimising per eval image latents then we need to do that first
         if self.config.eval_latent_optimisation_source == "image_half_inverse":
-            self.model.fit_latent_codes_for_eval(self.datamanager, self.config.eval_latent_optimisation_source)
+            self.model.fit_latent_codes_for_eval(
+                datamanager=self.datamanager,
+                gt_source=self.config.eval_latent_optimisation_source,
+                epochs=self.config.eval_latent_optimisation_epochs,
+                learning_rate=self.config.eval_latent_optimisation_lr,
+            )
         self.eval()
         ray_bundle, batch = self.datamanager.next_eval(step)
         model_outputs = self.model(ray_bundle)
@@ -190,7 +204,12 @@ class FitEvalLatentsPipeline(Pipeline):
             step: current iteration step
         """
         if self.config.eval_latent_optimisation_source == "image_half_inverse":
-            self.model.fit_latent_codes_for_eval(self.datamanager, self.config.eval_latent_optimisation_source)
+            self.model.fit_latent_codes_for_eval(
+                datamanager=self.datamanager,
+                gt_source=self.config.eval_latent_optimisation_source,
+                epochs=self.config.eval_latent_optimisation_epochs,
+                learning_rate=self.config.eval_latent_optimisation_lr,
+            )
         self.eval()
         image_idx, camera_ray_bundle, batch = self.datamanager.next_eval_image(step)
         outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)

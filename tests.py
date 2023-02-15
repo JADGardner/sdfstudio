@@ -514,3 +514,24 @@ sampler = lambda positions: directions.repeat(len(positions), 1, 1)
 # %%
 sampler([1, 2, 3]).shape
 # %%
+Z = torch.randn(1, 36, 3)
+D = torch.randn(1, 256, 3)
+z_xz = torch.stack((Z[:, :, 0], Z[:, :, 2]), -1)
+d_xz = torch.stack((D[:, :, 0], D[:, :, 2]), -1)
+# Invariant representation of Z, gram matrix G=Z*Z' is size B x ndims x ndims
+G = torch.bmm(z_xz, torch.transpose(z_xz, 1, 2))
+# Flatten G and replicate for all pixels, giving size B x npix x ndims^2
+z_xz_invar = G.flatten(start_dim=1).unsqueeze(1).repeat(1, D.shape[1], 1)
+# innerprod is size B x npix x ndims
+innerprod = torch.bmm(d_xz, torch.transpose(z_xz, 1, 2))
+d_xz_norm = torch.sqrt(D[:, :, 0] ** 2 + D[:, :, 2] ** 2).unsqueeze(2)
+# Copy Z_y for every pixel to be size B x npix x ndims
+z_y = Z[:, :, 1].unsqueeze(1).repeat(1, innerprod.shape[1], 1)
+# Just the y component of D (B x npix x 1)
+d_y = D[:, :, 1].unsqueeze(2)
+
+model_input = torch.cat((d_xz_norm, d_y, innerprod), 2)  # [B, npix, 2 + ndims]
+conditioning_input = torch.cat((z_xz_invar, z_y), 2)  # [B, npix, ndims^2 + ndims]
+
+
+model_input_concat = torch.cat((innerprod, z_xz_invar, d_xz_norm, z_y, d_y), 2)

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type
+from typing import Dict, List, Literal, Tuple, Type
 
 import numpy as np
 import torch
@@ -38,13 +38,18 @@ from nerfstudio.engine.callbacks import (
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.fields.reni_field import get_directions, get_reni_field, get_sineweight
+from nerfstudio.fields.reni_field_new import RENIField
+from nerfstudio.model_components.illumination_samplers import IcosahedronSampler
 from nerfstudio.model_components.losses import (
     RENITestLoss,
     RENITestLossMask,
     interlevel_loss,
 )
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler
-from nerfstudio.model_components.renderers import RGBRendererWithRENI
+from nerfstudio.model_components.renderers import (
+    RGBLambertianRendererWithVisibility,
+    RGBRendererWithRENI,
+)
 from nerfstudio.models.neus import NeuSModel, NeuSModelConfig
 from nerfstudio.utils import colormaps
 from nerfstudio.utils.colormaps import sRGB
@@ -92,7 +97,7 @@ class RENINeuSModelConfig(NeuSModelConfig):
     """Weight for the reni prior loss"""
     reni_cosine_loss_weight: float = 1e-1
     """Weight for the reni cosine loss"""
-    reni_loss_weight: float = 1.0
+    reni_loss_mult: float = 1.0
     """Weight for the reni loss"""
     orientation_loss_mult: float = 0.0001
     """Orientation loss multipier on computed noramls."""
@@ -100,6 +105,14 @@ class RENINeuSModelConfig(NeuSModelConfig):
     """Whether to predict visibility or not"""
     visibility_loss_mult: float = 0.01
     """Weight for the visibility loss"""
+    illumination_field: Literal["reni", "SH"] = "reni"
+    """Illumination field to use"""
+    illumination_sampler: Literal["icosahedron", "other"] = "icosahedron"
+    """Illumination sampler to use"""
+    icosphere_order: int = 2
+    """Order of the icosphere to use for illumination sampling"""
+    illumination_sample_directions: int = 100
+    """Number of directions to sample for illumination"""
 
 
 class RENINeuSModel(NeuSModel):
@@ -137,8 +150,17 @@ class RENINeuSModel(NeuSModel):
         super().populate_modules()
         self.use_average_appearance_embedding = False
 
-        self.reni_field_train = get_reni_field(self.config.reni_path, num_latent_codes=self.num_train_data)
-        self.reni_field_eval = get_reni_field(self.config.reni_path, num_latent_codes=self.num_eval_data)
+        # illumination sampler
+        if self.config.illumination_sampler == "icosahedron":
+            self.illumination_sampler = IcosahedronSampler(self.config.icosphere_order)
+
+        # illumination field
+        if self.config.illumination_field == "reni":
+            self.illumination_field_train = RENIField(self.config.reni_path, num_latent_codes=self.num_train_data)
+            self.illumination_field_eval = RENIField(self.config.reni_path, num_latent_codes=self.num_eval_data)
+
+        # self.reni_field_train = get_reni_field(self.config.reni_path, num_latent_codes=self.num_train_data)
+        # self.reni_field_eval = get_reni_field(self.config.reni_path, num_latent_codes=self.num_eval_data)
 
         # try:
         #     self.field.set_reni_field(self.reni_field)
@@ -181,14 +203,17 @@ class RENINeuSModel(NeuSModel):
         )
 
         self.renderer_rgb = RGBRendererWithRENI()
-        self.reni_loss = RENITestLossMask(
-            alpha=self.config.reni_prior_loss_weight, beta=self.config.reni_cosine_loss_weight
-        )
+        self.lambertian_renderer = RGBLambertianRendererWithVisibility()
+
+        if self.config.illumination_field == "reni":
+            self.illumination_loss = RENITestLossMask(
+                alpha=self.config.reni_prior_loss_weight, beta=self.config.reni_cosine_loss_weight
+            )
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = super().get_param_groups()
         param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
-        param_groups["field_background"] = list(self.reni_field_train.parameters())
+        param_groups["field_background"] = list(self.illumination_field_train.parameters())
         return param_groups
 
     def get_training_callbacks(
@@ -228,18 +253,41 @@ class RENINeuSModel(NeuSModel):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
 
         if self.training:
-            reni = self.reni_field_train if not self.fitting_eval_latents else self.reni_field_eval
+            illumination_field = (
+                self.illumination_field_train if not self.fitting_eval_latents else self.illumination_field_eval
+            )
         else:
-            reni = self.reni_field_eval
+            illumination_field = self.illumination_field_eval
 
-        field_outputs = self.field(ray_samples, return_alphas=True, reni_field=reni)
+        # if self.training:
+        #     reni = self.reni_field_train if not self.fitting_eval_latents else self.reni_field_eval
+        # else:
+        #     reni = self.reni_field_eval
+
+        illumination_directions = self.illumination_sampler(self.config.illumination_sample_directions)
+        illumination_directions = illumination_directions.to(self.device)
+
+        field_outputs = self.field(ray_samples, return_alphas=True, illumination_directions=illumination_directions)
         weights, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(
             field_outputs[FieldHeadNames.ALPHA]
         )
+
         bg_transmittance = transmittance[:, -1, :]
 
         weights_list.append(weights)
         ray_samples_list.append(ray_samples)
+
+        # Get camera indices for each sample
+        camera_indices = ray_samples.camera_indices.squeeze()  # [num_rays, samples_per_ray]
+        # Get illumination for samples
+        hdr_light_colours, light_directions = illumination_field(
+            camera_indices, None, illumination_directions, "illumination"
+        )
+
+        # Get illumination for camera rays
+        background_colours, _ = illumination_field(
+            camera_indices, None, ray_samples.frustums.directions[:, 0, :], "background"
+        )
 
         samples_and_field_outputs = {
             "ray_samples": ray_samples,
@@ -248,6 +296,9 @@ class RENINeuSModel(NeuSModel):
             "bg_transmittance": bg_transmittance,
             "weights_list": weights_list,
             "ray_samples_list": ray_samples_list,
+            "hdr_light_colours": hdr_light_colours,
+            "light_directions": light_directions,
+            "background_colours": background_colours,
         }
         return samples_and_field_outputs
 
@@ -262,17 +313,36 @@ class RENINeuSModel(NeuSModel):
         field_outputs = samples_and_field_outputs["field_outputs"]
         ray_samples = samples_and_field_outputs["ray_samples"]
         weights = samples_and_field_outputs["weights"]
+        hdr_light_colours = samples_and_field_outputs["hdr_light_colours"]
+        light_directions = samples_and_field_outputs["light_directions"]
+        background_colours = samples_and_field_outputs["background_colours"]
         # bg_transmittance = samples_and_field_outputs["bg_transmittance"]
 
-        rgb = self.renderer_rgb(
-            rgb=field_outputs[FieldHeadNames.RADIANCE],
-            background_color=field_outputs[FieldHeadNames.ILLUMINATION],
+        # rgb = self.renderer_rgb(
+        #     rgb=field_outputs[FieldHeadNames.RADIANCE],
+        #     background_color=field_outputs[FieldHeadNames.ILLUMINATION],
+        #     weights=weights,
+        # )
+
+        # albedo = self.renderer_rgb(
+        #     rgb=field_outputs[FieldHeadNames.ALBEDO],
+        #     background_color=torch.ones_like(field_outputs[FieldHeadNames.ILLUMINATION]),
+        #     weights=weights,
+        # )
+
+        rgb = self.lambertian_renderer(
+            albedos=field_outputs[FieldHeadNames.ALBEDO],
+            normals=field_outputs[FieldHeadNames.NORMAL],
+            light_directions=light_directions,
+            light_colors=hdr_light_colours,
+            visibility=field_outputs[FieldHeadNames.VISIBILITY] if self.config.predict_visibility else None,
+            background_color=background_colours,
             weights=weights,
         )
 
         albedo = self.renderer_rgb(
             rgb=field_outputs[FieldHeadNames.ALBEDO],
-            background_color=torch.ones_like(field_outputs[FieldHeadNames.ILLUMINATION]),
+            background_color=torch.ones_like(background_colours),
             weights=weights,
         )
 
@@ -286,11 +356,10 @@ class RENINeuSModel(NeuSModel):
         outputs = {
             "rgb": rgb,
             "albedo": albedo,
-            "illumination": field_outputs[FieldHeadNames.ILLUMINATION],
+            "illumination": background_colours,
             "accumulation": accumulation,
             "depth": depth,
             "normal": normal,
-            # "normals": field_outputs[FieldHeadNames.NORMAL],
             "weights": weights,
             "viewdirs": ray_bundle.directions,
             "directions_norm": ray_bundle.directions_norm,  # used to scale z_vals for free space and sdf loss
@@ -342,15 +411,18 @@ class RENINeuSModel(NeuSModel):
 
             if "fg_mask" in batch:
                 fg_label = batch["fg_mask"].float().to(self.device)
-                loss_dict["reni_loss"] = (
-                    self.reni_loss(
-                        inputs=outputs["illumination"],
-                        targets=batch["image"].to(self.device),
-                        mask=fg_label,
-                        Z=self.reni_field_train.get_Z(),
+                # TODO somehow make this not an if statement here
+                # Maybe get_loss_dict for the illumination_field should be a function?
+                if self.config.illumination_field == "reni":
+                    loss_dict["illumination_loss"] = (
+                        self.illumination_loss(
+                            inputs=outputs["illumination"],
+                            targets=batch["image"].to(self.device),
+                            mask=fg_label,
+                            Z=self.illumination_field_train.get_latents(),
+                        )
+                        * self.config.reni_loss_mult
                     )
-                    * self.config.reni_loss_weight
-                )
 
             if self.config.predict_visibility:
                 # binary_cross_entropy_with_logits between field_outputs[FieldHeadNames.VISIBILITY] which is shape
@@ -390,7 +462,7 @@ class RENINeuSModel(NeuSModel):
 
         return metrics_dict, images_dict
 
-    def fit_latent_codes_for_eval(self, datamanager, gt_source):
+    def fit_latent_codes_for_eval(self, datamanager, gt_source, epochs, learning_rate):
         """Fit evaluation latent codes to session envmaps so that illumination is correct."""
         source = (
             "environment maps"
@@ -401,10 +473,10 @@ class RENINeuSModel(NeuSModel):
         )
         CONSOLE.print(f"Optimising evaluation latent codes to {source}:")
 
-        # TODO Make configurable
-        epochs = 30
-        opt = torch.optim.Adam(self.reni_field_eval.parameters(), lr=1e-2)
-        reni_test_loss = RENITestLoss(alpha=1e-9, beta=1e-1)
+        opt = torch.optim.Adam(self.illumination_field_eval.parameters(), lr=learning_rate)
+        reni_test_loss = RENITestLoss(
+            alpha=self.config.reni_prior_loss_weight, beta=self.config.reni_cosine_loss_weight
+        )
 
         with Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -426,7 +498,7 @@ class RENINeuSModel(NeuSModel):
                 sky_colour = torch.tensor([70, 130, 180], dtype=torch.float32).to(self.device) / 255.0
             elif gt_source == "image_half_inverse":
                 # Re-initialise latents to zero
-                self.reni_field_eval.get_Z().data = torch.zeros_like(self.reni_field_eval.get_Z().data)
+                self.illumination_field_eval.reset_latents()
                 self.fitting_eval_latents = True
 
             # Fit latents
@@ -475,6 +547,7 @@ class RENINeuSModel(NeuSModel):
                             -1, 3
                         )  # [H*W, 3] # TODO: confirm this is row-major (internet seems to think so)
 
+                        # TODO (james): need to mask transients
                         # rebuild a new RayBundle with the left half of the image
                         ray_bundle.origins = ray_bundle.origins[
                             :, : ray_bundle.origins.shape[1] // 2, :, :
@@ -507,15 +580,16 @@ class RENINeuSModel(NeuSModel):
                         rgb = rgb[indices, :]  # [N, 3]
 
                     # Get model output
+                    # TODO Fix these two: they are not working
                     if gt_source in ["envmap", "image_half_sky"]:
                         # sample the reni field
-                        Z = self.reni_field_eval.get_Z()[idx, :, :]
+                        Z = self.illumination_field_eval.get_Z()[idx, :, :]
                         if len(Z.shape) == 2:
                             Z = Z.unsqueeze(0)
 
                         D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [B, num_rays, 3]
-                        model_output = self.reni_field_eval(Z, D)  # [B, num_rays, 3]
-                        model_output = self.reni_field_eval.unnormalise(
+                        model_output = self.illumination_field_eval(Z, D)  # [B, num_rays, 3]
+                        model_output = self.illumination_field_eval.unnormalise(
                             model_output
                         )  # undo reni scaling between -1 and 1
                         model_output = sRGB(model_output)  # undo reni gamma correction
@@ -528,7 +602,9 @@ class RENINeuSModel(NeuSModel):
                         loss, _, _, _ = reni_test_loss(model_output, rgb, S, Z)
                     else:
                         loss = (
-                            self.rgb_loss(rgb, model_output) + 1e-9 * torch.pow(self.reni_field_eval.get_Z(), 2).sum()
+                            self.rgb_loss(rgb, model_output)
+                            + self.config.reni_prior_loss_weight
+                            * torch.pow(self.illumination_field_eval.get_latents(), 2).sum()
                         )
                     epoch_loss += loss.item()
                     loss.backward()
@@ -537,8 +613,7 @@ class RENINeuSModel(NeuSModel):
                 progress.update(task, advance=1, extra=f"{epoch_loss:.4f}")
 
         if gt_source in ["envmap", "image_half"]:
-            self.reni_field_eval.mu.requires_grad = (
-                False  # We no longer need to optimise latent codes as done prior to start of training
-            )
+            self.illumination_field_eval.set_no_grad()  # We no longer need to optimise latent codes as done prior to start of training
+
         # no longer fitting latents
         self.fitting_eval_latents = False

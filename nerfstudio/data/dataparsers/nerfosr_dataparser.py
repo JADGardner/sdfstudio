@@ -287,12 +287,15 @@ class NeRFOSR(DataParser):
             camera_to_worlds[:, :3, 3] *= scale_factor * self.config.scale_factor
 
             # add an offset to x and y so that the object are centered
-            # TODO this is hard coded per scene, what is the best way to do this?
+            # TODO this is hard coded per scene, there must be a better way to do this?
             if self.scene == "stjacob":
                 camera_to_worlds[:, 0, 3] += -0.3  # x
                 camera_to_worlds[:, 1, 3] += -0.5  # y
             if self.scene == "europa":
                 camera_to_worlds[:, 0, 3] += -0.1  # x
+                camera_to_worlds[:, 1, 3] += -0.65  # y
+            if self.scene == "lk2":
+                camera_to_worlds[:, 0, 3] += -0.0  # x
                 camera_to_worlds[:, 1, 3] += -0.65  # y
         else:
             camera_to_worlds, _ = camera_utils.auto_orient_and_center_poses(

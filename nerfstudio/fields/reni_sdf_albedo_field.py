@@ -445,7 +445,7 @@ class RENISDFAlbedoField(Field):
     def get_colors(self, albedos, normals, light_directions, light_colours, visibility=None):
         """compute colors"""
 
-        # points.shape = [num_rays * samples_per_ray, 3]
+        # albedos.shape = [num_rays * samples_per_ray, 3]
         # normals.shape = [num_rays, samples_per_ray, 3]
         # light_directions.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
         # light_colours.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
@@ -503,7 +503,7 @@ class RENISDFAlbedoField(Field):
         return color
 
     def get_outputs(
-        self, ray_samples: RaySamples, return_alphas=False, return_occupancy=False, reni=None
+        self, ray_samples: RaySamples, return_alphas=False, return_occupancy=False, illumination_directions=None
     ):  # pylint: disable=arguments-renamed
         """compute output of ray samples"""
         if ray_samples.camera_indices is None:
@@ -542,22 +542,26 @@ class RENISDFAlbedoField(Field):
 
         albedo = self.get_albedo(positions_flat, geo_features)
 
-        # Get the unique cameras in this batch
-        unique_indices, inverse_indices = torch.unique(camera_indices, return_inverse=True)
-        # Get the corresponding latent vectors for the unique cameras
-        Z, _, _ = reni.sample_latent(unique_indices)  # [unique_indices, ndims, 3]
-        light_directions = self.icosphere  # [D, 3]
-        # convert to RENI coordinate system
-        light_directions = torch.stack([-light_directions[:, 0], light_directions[:, 2], light_directions[:, 1]], dim=1)
-        light_directions = light_directions.unsqueeze(0).repeat(Z.shape[0], 1, 1).to(Z.device)  # [unique_indices, D, 3]
-        light_colours = reni(Z, light_directions)  # [unique_indices, D, 3]
-        light_colours = reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
-        light_colours = light_colours[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
-        light_colours = light_colours.reshape(-1, self.icosphere.shape[0], 3)  # [num_rays * samples_per_ray, D, 3]
-        light_directions = light_directions[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
-        light_directions = light_directions.reshape(
-            -1, self.icosphere.shape[0], 3
-        )  # [num_rays * samples_per_ray, D, 3]
+        # # Get the unique cameras in this batch
+        # unique_indices, inverse_indices = torch.unique(camera_indices, return_inverse=True)
+        # # Get the corresponding latent vectors for the unique cameras
+        # Z, _, _ = reni.sample_latent(unique_indices)  # [unique_indices, ndims, 3]
+        # light_directions = self.icosphere  # [D, 3]
+        # # convert to RENI coordinate system
+        # light_directions = torch.stack([-light_directions[:, 0], light_directions[:, 2], light_directions[:, 1]], dim=1)
+        # light_directions = light_directions.unsqueeze(0).repeat(Z.shape[0], 1, 1).to(Z.device)  # [unique_indices, D, 3]
+        # light_colours = reni(Z, light_directions)  # [unique_indices, D, 3]
+        # # convert back to nerfstudio coordinate system
+        # light_directions = torch.stack(
+        #     [-light_directions[:, :, 0], light_directions[:, :, 2], light_directions[:, :, 1]], dim=2
+        # )
+        # light_colours = reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
+        # light_colours = light_colours[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
+        # light_colours = light_colours.reshape(-1, self.icosphere.shape[0], 3)  # [num_rays * samples_per_ray, D, 3]
+        # light_directions = light_directions[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
+        # light_directions = light_directions.reshape(
+        #     -1, self.icosphere.shape[0], 3
+        # )  # [num_rays * samples_per_ray, D, 3]
 
         illumination_visibility = None
         if self.use_visibility:
@@ -568,7 +572,8 @@ class RENISDFAlbedoField(Field):
             feature = self.encoding(positions)
             pe = self.position_encoding(inputs_flat)
             positions_flat = torch.cat((inputs_flat, pe, feature), dim=-1)
-            directions = self.icosphere.to(positions.device)  # [D, 3]
+            # directions = self.icosphere.to(positions.device)  # [D, 3]
+            directions = illumination_directions  # [D, 3]
             directions = self.direction_encoding(directions)  # [D, 16] (SH encoding, order 4)
             directions = directions.unsqueeze(0).repeat(positions_flat.shape[0], 1, 1)  # [K, D, 16]
             density_emb = geo_features.view(-1, self.config.geo_feat_dim)  # [K, 15]
@@ -580,7 +585,9 @@ class RENISDFAlbedoField(Field):
             visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
             x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
             illumination_visibility = self.field_head_visibility(x.float())
-            illumination_visibility = illumination_visibility.view(-1, self.icosphere.shape[0], 1).squeeze()  # [K, D]
+            illumination_visibility = illumination_visibility.view(
+                -1, illumination_directions.shape[0], 1
+            ).squeeze()  # [K, D]
 
             # now for camera rays to apply loss from sky masks
             inputs = ray_samples.frustums.get_start_positions()
@@ -601,33 +608,33 @@ class RENISDFAlbedoField(Field):
             visibility = visibility.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
             outputs.update({FieldHeadNames.VISIBILITY: visibility})
 
-        rgb = self.get_colors(
-            albedos=albedo,
-            normals=normals,
-            light_directions=light_directions,
-            light_colours=light_colours,
-            visibility=illumination_visibility,
-        )  # [Batch_size * num_image_per_batch, 3]
+        # rgb = self.get_colors(
+        #     albedos=albedo,
+        #     normals=normals,
+        #     light_directions=light_directions,
+        #     light_colours=light_colours,
+        #     visibility=illumination_visibility,
+        # )  # [Batch_size * num_image_per_batch, 3]
 
         albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
-        radiance = rgb.view(*ray_samples.frustums.directions.shape[:-1], -1)
+        # radiance = rgb.view(*ray_samples.frustums.directions.shape[:-1], -1)
 
-        z_rays = Z[inverse_indices[:, 0], :, :]  # [num_rays, ndims, 3]
-        directions = ray_samples.frustums.directions
-        D = directions[:, 0, :].unsqueeze(1)  # [num_rays, 1, 3]
-        # convert to RENI coordinate system
-        D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [num_rays, 1, 3]
-        reni_rgb = reni(z_rays, D).squeeze(1)  # [num_rays, 1, 3]
-        reni_rgb = reni.unnormalise(reni_rgb)  # undo reni scaling between -1 and 1
-        reni_rgb = sRGB(reni_rgb)  # undo reni gamma correction
+        # z_rays = Z[inverse_indices[:, 0], :, :]  # [num_rays, ndims, 3]
+        # directions = ray_samples.frustums.directions
+        # D = directions[:, 0, :].unsqueeze(1)  # [num_rays, 1, 3]
+        # # convert to RENI coordinate system
+        # D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [num_rays, 1, 3]
+        # reni_rgb = reni(z_rays, D).squeeze(1)  # [num_rays, 1, 3]
+        # reni_rgb = reni.unnormalise(reni_rgb)  # undo reni scaling between -1 and 1
+        # reni_rgb = sRGB(reni_rgb)  # undo reni gamma correction
 
         camera_indices = []
 
         outputs.update(
             {
                 FieldHeadNames.ALBEDO: albedo,
-                FieldHeadNames.RADIANCE: radiance,
-                FieldHeadNames.ILLUMINATION: reni_rgb,
+                # FieldHeadNames.RADIANCE: radiance,
+                # FieldHeadNames.ILLUMINATION: reni_rgb,
                 FieldHeadNames.DENSITY: density,
                 FieldHeadNames.SDF: sdf,
                 FieldHeadNames.NORMAL: normals,
@@ -654,7 +661,7 @@ class RENISDFAlbedoField(Field):
         ray_samples: RaySamples,
         return_alphas=False,
         return_occupancy=False,
-        reni_field=None,
+        illumination_directions=None,
     ):  # pylint: disable=arguments-renamed
         """Evaluates the field at points along the ray.
 
@@ -665,6 +672,6 @@ class RENISDFAlbedoField(Field):
             ray_samples,
             return_alphas=return_alphas,
             return_occupancy=return_occupancy,
-            reni=reni_field,
+            illumination_directions=illumination_directions,
         )
         return field_outputs

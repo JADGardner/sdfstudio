@@ -155,6 +155,10 @@ class RGBLambertianRendererWithVisibility(nn.Module):
         Returns:
             Outputs rgb values.
         """
+        albedos = albedos.view(-1, 3)
+        normals = normals.view(-1, 3)
+        visibility = visibility.view(-1, 1)
+
         max_chunk_size = 200000
 
         if albedos.shape[0] > max_chunk_size:
@@ -199,9 +203,11 @@ class RGBLambertianRendererWithVisibility(nn.Module):
                 dot_prod = dot_prod * visibility
 
             # compute final color by multiplying dot product with albedo color and light color
-            radiance = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colors)  # [num_rays * samples_per_ray, 3]
+            color = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colors)  # [num_rays * samples_per_ray, 3]
 
         radiance = sRGB(color)
+
+        radiance = radiance.view(*weights.shape[:-1], 3)
 
         if ray_indices is not None and num_rays is not None:
             # Necessary for packed samples from volumetric ray sampler
