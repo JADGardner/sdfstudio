@@ -119,10 +119,10 @@ class SingleVarianceNetwork(nn.Module):
 
 
 @dataclass
-class RENISDFAlbedoFieldConfig(SDFFieldConfig):
+class SDFAlbedoVisibilityFieldConfig(SDFFieldConfig):
     """Nerfacto Model Config"""
 
-    _target: Type = field(default_factory=lambda: RENISDFAlbedoField)
+    _target: Type = field(default_factory=lambda: SDFAlbedoVisibilityField)
     icosphere_order: int = 3
     use_visibility: bool = True
     num_layers_visibility: int = 3
@@ -131,18 +131,18 @@ class RENISDFAlbedoFieldConfig(SDFFieldConfig):
     """Number of light sample directions per point"""
 
 
-class RENISDFAlbedoField(Field):
+class SDFAlbedoVisibilityField(Field):
     """_summary_
 
     Args:
         Field (_type_): _description_
     """
 
-    config: RENISDFAlbedoFieldConfig
+    config: SDFAlbedoVisibilityFieldConfig
 
     def __init__(
         self,
-        config: RENISDFAlbedoFieldConfig,
+        config: SDFAlbedoVisibilityFieldConfig,
         aabb,
         num_images: int,
         use_average_appearance_embedding: bool = False,
@@ -279,7 +279,7 @@ class RENISDFAlbedoField(Field):
             # print("=======", lin.weight.shape)
             setattr(self, "clin" + str(l), lin)
 
-            # explicit visibility prediction
+        # explicit illumination visibility prediction
         if self.use_visibility:
             self.mlp_visibility = tcnn.Network(
                 n_input_dims=3
@@ -442,65 +442,65 @@ class RENISDFAlbedoField(Field):
         albedo = self.sigmoid(h)  # [num_rays * samples_per_ray, 3]
         return albedo
 
-    def get_colors(self, albedos, normals, light_directions, light_colours, visibility=None):
-        """compute colors"""
+    # def get_colors(self, albedos, normals, light_directions, light_colours, visibility=None):
+    #     """compute colors"""
 
-        # albedos.shape = [num_rays * samples_per_ray, 3]
-        # normals.shape = [num_rays, samples_per_ray, 3]
-        # light_directions.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
-        # light_colours.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
+    #     # albedos.shape = [num_rays * samples_per_ray, 3]
+    #     # normals.shape = [num_rays, samples_per_ray, 3]
+    #     # light_directions.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
+    #     # light_colours.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
 
-        normals = normals.view(-1, 3)
+    #     normals = normals.view(-1, 3)
 
-        max_chunk_size = 200000
+    #     max_chunk_size = 200000
 
-        if albedos.shape[0] > max_chunk_size:
-            num_chunks = albedos.shape[0] // max_chunk_size + 1
+    #     if albedos.shape[0] > max_chunk_size:
+    #         num_chunks = albedos.shape[0] // max_chunk_size + 1
 
-            color_chunks = []
-            for i in range(num_chunks):
-                albedos_chunk = albedos[i * max_chunk_size : (i + 1) * max_chunk_size]
-                normals_chunk = normals[i * max_chunk_size : (i + 1) * max_chunk_size]
-                light_directions_chunk = light_directions[i * max_chunk_size : (i + 1) * max_chunk_size]
-                light_colours_chunk = light_colours[i * max_chunk_size : (i + 1) * max_chunk_size]
+    #         color_chunks = []
+    #         for i in range(num_chunks):
+    #             albedos_chunk = albedos[i * max_chunk_size : (i + 1) * max_chunk_size]
+    #             normals_chunk = normals[i * max_chunk_size : (i + 1) * max_chunk_size]
+    #             light_directions_chunk = light_directions[i * max_chunk_size : (i + 1) * max_chunk_size]
+    #             light_colours_chunk = light_colours[i * max_chunk_size : (i + 1) * max_chunk_size]
 
-                dot_prod = torch.einsum(
-                    "bi,bji->bj", normals_chunk, light_directions_chunk
-                )  # [num_rays * samples_per_ray, num_reni_directions]
+    #             dot_prod = torch.einsum(
+    #                 "bi,bji->bj", normals_chunk, light_directions_chunk
+    #             )  # [num_rays * samples_per_ray, num_reni_directions]
 
-                dot_prod = torch.clamp(dot_prod, 0, 1)
+    #             dot_prod = torch.clamp(dot_prod, 0, 1)
 
-                if visibility is not None:
-                    visibility_chunk = visibility[i * max_chunk_size : (i + 1) * max_chunk_size]
-                    dot_prod = dot_prod * visibility_chunk
+    #             if visibility is not None:
+    #                 visibility_chunk = visibility[i * max_chunk_size : (i + 1) * max_chunk_size]
+    #                 dot_prod = dot_prod * visibility_chunk
 
-                color_chunk = torch.einsum(
-                    "bi,bj,bji->bi", albedos_chunk, dot_prod, light_colours_chunk
-                )  # [num_rays * samples_per_ray, 3]
+    #             color_chunk = torch.einsum(
+    #                 "bi,bj,bji->bi", albedos_chunk, dot_prod, light_colours_chunk
+    #             )  # [num_rays * samples_per_ray, 3]
 
-                color_chunks.append(color_chunk)
+    #             color_chunks.append(color_chunk)
 
-            color = torch.cat(color_chunks, dim=0)
+    #         color = torch.cat(color_chunks, dim=0)
 
-        else:
-            # compute dot product between normals [num_rays * samples_per_ray, 3] and light directions [num_rays * samples_per_ray, num_reni_directions, 3]
-            dot_prod = torch.einsum(
-                "bi,bji->bj", normals, light_directions
-            )  # [num_rays * samples_per_ray, num_reni_directions]
+    #     else:
+    #         # compute dot product between normals [num_rays * samples_per_ray, 3] and light directions [num_rays * samples_per_ray, num_reni_directions, 3]
+    #         dot_prod = torch.einsum(
+    #             "bi,bji->bj", normals, light_directions
+    #         )  # [num_rays * samples_per_ray, num_reni_directions]
 
-            # clamp dot product values to be between 0 and 1
-            dot_prod = torch.clamp(dot_prod, 0, 1)
+    #         # clamp dot product values to be between 0 and 1
+    #         dot_prod = torch.clamp(dot_prod, 0, 1)
 
-            if visibility is not None:
-                # Apply the visibility mask to the dot product
-                dot_prod = dot_prod * visibility
+    #         if visibility is not None:
+    #             # Apply the visibility mask to the dot product
+    #             dot_prod = dot_prod * visibility
 
-            # compute final color by multiplying dot product with albedo color and light color
-            color = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colours)  # [num_rays * samples_per_ray, 3]
+    #         # compute final color by multiplying dot product with albedo color and light color
+    #         color = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colours)  # [num_rays * samples_per_ray, 3]
 
-        color = sRGB(color)
+    #     color = sRGB(color)
 
-        return color
+    #     return color
 
     def get_outputs(
         self, ray_samples: RaySamples, return_alphas=False, return_occupancy=False, illumination_directions=None
@@ -511,13 +511,10 @@ class RENISDFAlbedoField(Field):
 
         outputs = {}
 
-        camera_indices = ray_samples.camera_indices.squeeze()  # [num_rays, samples_per_ray]
-
         positions = ray_samples.frustums.get_start_positions()  # [num_rays, samples_per_ray, 3]
         positions_flat = positions.view(-1, 3)  # [num_rays * samples_per_ray, 3]
 
         directions = ray_samples.frustums.directions  # [num_rays, samples_per_ray, 3] # all samples have same direction
-        # directions_flat = directions.reshape(-1, 3)  # [num_rays * samples_per_ray, 3]
 
         positions_flat.requires_grad_(True)
         with torch.enable_grad():
@@ -541,27 +538,6 @@ class RENISDFAlbedoField(Field):
         normals = torch.nn.functional.normalize(gradients, p=2, dim=-1)
 
         albedo = self.get_albedo(positions_flat, geo_features)
-
-        # # Get the unique cameras in this batch
-        # unique_indices, inverse_indices = torch.unique(camera_indices, return_inverse=True)
-        # # Get the corresponding latent vectors for the unique cameras
-        # Z, _, _ = reni.sample_latent(unique_indices)  # [unique_indices, ndims, 3]
-        # light_directions = self.icosphere  # [D, 3]
-        # # convert to RENI coordinate system
-        # light_directions = torch.stack([-light_directions[:, 0], light_directions[:, 2], light_directions[:, 1]], dim=1)
-        # light_directions = light_directions.unsqueeze(0).repeat(Z.shape[0], 1, 1).to(Z.device)  # [unique_indices, D, 3]
-        # light_colours = reni(Z, light_directions)  # [unique_indices, D, 3]
-        # # convert back to nerfstudio coordinate system
-        # light_directions = torch.stack(
-        #     [-light_directions[:, :, 0], light_directions[:, :, 2], light_directions[:, :, 1]], dim=2
-        # )
-        # light_colours = reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
-        # light_colours = light_colours[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
-        # light_colours = light_colours.reshape(-1, self.icosphere.shape[0], 3)  # [num_rays * samples_per_ray, D, 3]
-        # light_directions = light_directions[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
-        # light_directions = light_directions.reshape(
-        #     -1, self.icosphere.shape[0], 3
-        # )  # [num_rays * samples_per_ray, D, 3]
 
         illumination_visibility = None
         if self.use_visibility:
@@ -608,33 +584,11 @@ class RENISDFAlbedoField(Field):
             visibility = visibility.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
             outputs.update({FieldHeadNames.VISIBILITY: visibility})
 
-        # rgb = self.get_colors(
-        #     albedos=albedo,
-        #     normals=normals,
-        #     light_directions=light_directions,
-        #     light_colours=light_colours,
-        #     visibility=illumination_visibility,
-        # )  # [Batch_size * num_image_per_batch, 3]
-
         albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
-        # radiance = rgb.view(*ray_samples.frustums.directions.shape[:-1], -1)
-
-        # z_rays = Z[inverse_indices[:, 0], :, :]  # [num_rays, ndims, 3]
-        # directions = ray_samples.frustums.directions
-        # D = directions[:, 0, :].unsqueeze(1)  # [num_rays, 1, 3]
-        # # convert to RENI coordinate system
-        # D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [num_rays, 1, 3]
-        # reni_rgb = reni(z_rays, D).squeeze(1)  # [num_rays, 1, 3]
-        # reni_rgb = reni.unnormalise(reni_rgb)  # undo reni scaling between -1 and 1
-        # reni_rgb = sRGB(reni_rgb)  # undo reni gamma correction
-
-        camera_indices = []
 
         outputs.update(
             {
                 FieldHeadNames.ALBEDO: albedo,
-                # FieldHeadNames.RADIANCE: radiance,
-                # FieldHeadNames.ILLUMINATION: reni_rgb,
                 FieldHeadNames.DENSITY: density,
                 FieldHeadNames.SDF: sdf,
                 FieldHeadNames.NORMAL: normals,

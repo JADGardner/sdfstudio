@@ -41,7 +41,6 @@ from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.fields.reni_field import get_directions, get_reni_field, get_sineweight
-from nerfstudio.fields.reni_nerfacto_albedo_field import TCNNRENINerfactoAlbedoField
 from nerfstudio.model_components.losses import (
     MSELoss,
     RENITestLoss,

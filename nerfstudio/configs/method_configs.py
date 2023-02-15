@@ -53,7 +53,7 @@ from nerfstudio.engine.schedulers import (
     NeuSSchedulerConfig,
 )
 from nerfstudio.field_components.temporal_distortions import TemporalDistortionKind
-from nerfstudio.fields.reni_sdf_albedo_field import RENISDFAlbedoFieldConfig
+from nerfstudio.fields.sdf_albedo_visibility_field import SDFAlbedoVisibilityFieldConfig
 from nerfstudio.fields.sdf_field import SDFFieldConfig
 from nerfstudio.models.dto import DtoOModelConfig
 from nerfstudio.models.instant_ngp import InstantNGPModelConfig
@@ -887,11 +887,14 @@ method_configs["RENI-NeuS"] = Config(
             ),
         ),
         model=RENINeuSModelConfig(
-            sdf_field=RENISDFAlbedoFieldConfig(
+            sdf_field=SDFAlbedoVisibilityFieldConfig(
                 use_grid_feature=True,
-                num_layers=5,
-                num_layers_color=5,
+                num_layers=2,
+                num_layers_color=2,
+                num_layers_visibility=2,
                 hidden_dim=256,
+                hidden_dim_color=256,
+                hidden_dim_visibility=64,
                 bias=0.5,
                 beta_init=0.3,
                 use_appearance_embedding=False,
@@ -903,9 +906,11 @@ method_configs["RENI-NeuS"] = Config(
             reni_loss_mult=1.0,
             reni_path="checkpoints/reni_pretrained_weights/latent_dim_36_net_5_256_vad_cbc_tanh_hdr/version_0/checkpoints/fit_decoder_epoch=1579.ckpt",
             near_plane=0.05,
-            far_plane=100.0,
+            far_plane=3.0,
             predict_visibility=True,
             visibility_loss_mult=0.5,
+            background_model="grid",
+            use_average_appearance_embedding=False,
         ),
         eval_latent_optimisation_source="image_half_inverse",
         eval_latent_optimisation_epochs=50,
@@ -913,17 +918,20 @@ method_configs["RENI-NeuS"] = Config(
     ),
     optimizers={
         "proposal_networks": {
-            "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
-            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=2.0, max_steps=20000),
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.1, max_steps=20000),
         },
         "fields": {
-            "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
-            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=2.0, max_steps=20000),
+            "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
+            "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.1, max_steps=20000),
         },
-        "field_background": {  # RENI in this case
+        "field_background": {
+            "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
+            "scheduler": SchedulerConfig(lr_final=1e-3, max_steps=20000),
+        },
+        "illumination_field": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             "scheduler": SchedulerConfig(lr_final=1e-3, max_steps=20000),
-            # "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=0.05, max_steps=20000),
         },
     },
     viewer=ViewerConfig(num_rays_per_chunk=1 << 15),

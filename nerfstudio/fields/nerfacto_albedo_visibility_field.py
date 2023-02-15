@@ -107,7 +107,6 @@ class TCNNRENINerfactoAlbedoField(Field):
         output_dim_semantics: int = 64,
         use_pred_normals: bool = True,
         spatial_distortion: Optional[SpatialDistortion] = None,
-        icosphere_order: int = 2,
         use_visibility: bool = True,
     ) -> None:
         super().__init__()
@@ -119,12 +118,7 @@ class TCNNRENINerfactoAlbedoField(Field):
         self.num_images = num_images
         self.use_semantics = use_semantics
         self.use_pred_normals = use_pred_normals
-        self.icosphere_order = icosphere_order
         self.use_visibility = use_visibility
-
-        # for sampling RENI field
-        vertices, _ = icosphere.icosphere(self.icosphere_order)
-        self.icosphere = torch.from_numpy(vertices).float()
 
         base_res = 16
         features_per_level = 2
@@ -267,73 +261,14 @@ class TCNNRENINerfactoAlbedoField(Field):
         density = trunc_exp(density_before_activation.to(positions))
         return density, base_mlp_out
 
-    def get_colors(self, albedos, normals, light_directions, light_colours, visibility):
-        """Lambertian rendering"""
-
-        # albedos.shape = [num_rays, samples_per_ray, 3]
-        # normals.shape = [num_rays, samples_per_ray, 3]
-        # light_directions.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
-        # light_colours.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
-        # visibility.shape = [num_rays * samples_per_ray, num_reni_directions]
-
-        albedos = albedos.view(-1, 3)
-        normals = normals.view(-1, 3)
-
-        max_chunk_size = 200000
-
-        if albedos.shape[0] > max_chunk_size:
-            num_chunks = albedos.shape[0] // max_chunk_size + 1
-
-            color_chunks = []
-            for i in range(num_chunks):
-                albedos_chunk = albedos[i * max_chunk_size : (i + 1) * max_chunk_size]
-                normals_chunk = normals[i * max_chunk_size : (i + 1) * max_chunk_size]
-                light_directions_chunk = light_directions[i * max_chunk_size : (i + 1) * max_chunk_size]
-                light_colours_chunk = light_colours[i * max_chunk_size : (i + 1) * max_chunk_size]
-                dot_prod = torch.einsum(
-                    "bi,bji->bj", normals_chunk, light_directions_chunk
-                )  # [num_rays * samples_per_ray, num_reni_directions]
-
-                dot_prod = torch.clamp(dot_prod, 0, 1)
-
-                if visibility is not None:
-                    visibility_chunk = visibility[i * max_chunk_size : (i + 1) * max_chunk_size]
-                    dot_prod = dot_prod * visibility_chunk
-
-                color_chunk = torch.einsum(
-                    "bi,bj,bji->bi", albedos_chunk, dot_prod, light_colours_chunk
-                )  # [num_rays * samples_per_ray, 3]
-
-                color_chunks.append(color_chunk)
-
-            color = torch.cat(color_chunks, dim=0)
-
-        else:
-            # compute dot product between normals [num_rays * samples_per_ray, 3] and light directions [num_rays * samples_per_ray, num_reni_directions, 3]
-            dot_prod = torch.einsum(
-                "bi,bji->bj", normals.view(-1, 3), light_directions
-            )  # [num_rays * samples_per_ray, num_reni_directions]
-
-            # clamp dot product values to be between 0 and 1
-            dot_prod = torch.clamp(dot_prod, 0, 1)
-
-            if visibility is not None:
-                # Apply the visibility mask to the dot product
-                dot_prod = dot_prod * visibility
-
-            # compute final color by multiplying dot product with albedo color and light color and visibility
-            color = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colours)  # [num_rays * samples_per_ray, 3]
-
-        color = sRGB(color)
-
-        return color
-
-    def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None, reni_field=None):
+    def get_outputs(
+        self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None, illumination_directions=None
+    ):
         assert density_embedding is not None
         outputs = {}
         if ray_samples.camera_indices is None:
             raise AttributeError("Camera indices are not provided.")
-        camera_indices = ray_samples.camera_indices.squeeze()
+        # camera_indices = ray_samples.camera_indices.squeeze()
         directions = get_normalized_directions(
             ray_samples.frustums.directions
         )  # [num_rays, samples_per_ray, 3] # all samples have same direction
@@ -368,33 +303,13 @@ class TCNNRENINerfactoAlbedoField(Field):
 
         albedo = self.mlp_head(density_embedding.view(-1, self.geo_feat_dim)).view(*outputs_shape, -1).to(directions)
 
+        albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
+
         outputs.update({FieldHeadNames.ALBEDO: albedo})
 
         # check if nan in rgb
         if torch.isnan(albedo).any():
             raise ValueError("NaN in rgb, prior to lambertian shading.")
-
-        # # for each ray,
-        # # Get the unique cameras in this batch, need unique indices to sample correct latent code from reni
-        unique_indices, inverse_indices = torch.unique(camera_indices, return_inverse=True)
-        # # Get the corresponding latent vectors for the unique cameras
-        Z, _, _ = reni_field.sample_latent(unique_indices)  # [unique_indices, ndims, 3]
-        light_directions = self.icosphere  # [D, 3]
-        # swap y and z axis to match the reni coordinate system
-        light_directions = torch.stack([-light_directions[:, 0], light_directions[:, 2], light_directions[:, 1]], dim=1)
-        # we are sampling the same set of directions for all unique cameras and for all samples along the ray
-        light_directions = light_directions.unsqueeze(0).repeat(Z.shape[0], 1, 1).to(Z.device)  # [unique_indices, D, 3]
-        # get the output of reni
-        light_colours = reni_field(Z, light_directions)  # [unique_indices, D, 3]
-        # undo reni hdr scaling between -1 and 1 so it's now in range [0, +inf]
-        light_colours = reni_field.unnormalise(light_colours)
-        # reshape to match the number of rays and samples per ray using the inverse indices to get the correct cameras
-        light_colours = light_colours[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
-        light_colours = light_colours.reshape(-1, self.icosphere.shape[0], 3)  # [num_rays * samples_per_ray, D, 3]
-        light_directions = light_directions[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
-        light_directions = light_directions.reshape(
-            -1, self.icosphere.shape[0], 3
-        )  # [num_rays * samples_per_ray, D, 3]
 
         illumination_visibility = None
         if self.use_visibility:
@@ -405,7 +320,7 @@ class TCNNRENINerfactoAlbedoField(Field):
             else:
                 positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
             positions_flat = self.position_encoding(positions.view(-1, 3))  # [num_rays * samples_per_ray, 16]
-            directions = self.icosphere.to(positions.device)  # [D, 3]
+            directions = illumination_directions  # [D, 3]
             directions = self.direction_encoding(directions)  # [D, 16] (SH encoding, order 4)
             directions = directions.unsqueeze(0).repeat(positions_flat.shape[0], 1, 1)  # [K, D, 16]
             density_emb = density_embedding.view(-1, self.geo_feat_dim)  # [K, 15]
@@ -417,7 +332,9 @@ class TCNNRENINerfactoAlbedoField(Field):
             visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
             x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
             illumination_visibility = self.field_head_visibility(x.float())
-            illumination_visibility = illumination_visibility.view(-1, self.icosphere.shape[0], 1).squeeze()  # [K, D]
+            illumination_visibility = illumination_visibility.view(
+                -1, illumination_directions.shape[0], 1
+            ).squeeze()  # [K, D]
 
             # now for camera rays to apply loss from sky masks
             if self.spatial_distortion is not None:
@@ -437,31 +354,9 @@ class TCNNRENINerfactoAlbedoField(Field):
             visibility = visibility.view(positions.shape[0], positions.shape[1], 1)  # [K, D, 1]
             outputs.update({FieldHeadNames.VISIBILITY: visibility})
 
-        rgb = self.get_colors(
-            albedos=albedo,
-            normals=normals,
-            light_directions=light_directions,
-            light_colours=light_colours,
-            visibility=illumination_visibility,
-        )
-
-        radiance = rgb.view(*ray_samples.frustums.directions.shape[:-1], -1)
-
-        outputs.update({FieldHeadNames.RADIANCE: radiance})
-
-        z_rays = Z[inverse_indices[:, 0], :, :]  # [num_rays, ndims, 3]
-        D = ray_samples.frustums.directions
-        D = D[:, 0, :].unsqueeze(1)  # [num_rays, 1, 3]
-        D = torch.stack([-D[:, :, 0], D[:, :, 2], D[:, :, 1]], dim=2)  # [unique_indices, 1, 3]
-        reni_rgb = reni_field(z_rays, D).squeeze(1)  # [num_rays, 3]
-        reni_rgb = reni_field.unnormalise(reni_rgb)  # undo reni scaling between -1 and 1
-        reni_rgb = sRGB(reni_rgb)  # undo reni gamma correction
-
-        outputs.update({FieldHeadNames.ILLUMINATION: reni_rgb})
-
         return outputs
 
-    def forward(self, ray_samples: RaySamples, compute_normals: bool = False, reni_field=None):
+    def forward(self, ray_samples: RaySamples, compute_normals: bool = False, illumination_directions=None):
         """Evaluates the field at points along the ray.
 
         Args:
@@ -473,7 +368,9 @@ class TCNNRENINerfactoAlbedoField(Field):
         else:
             density, density_embedding = self.get_density(ray_samples)
 
-        field_outputs = self.get_outputs(ray_samples, density_embedding=density_embedding, reni_field=reni_field)
+        field_outputs = self.get_outputs(
+            ray_samples, density_embedding=density_embedding, illumination_directions=illumination_directions
+        )
         field_outputs[FieldHeadNames.DENSITY] = density  # type: ignore
 
         if compute_normals:
