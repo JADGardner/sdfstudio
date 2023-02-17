@@ -163,14 +163,14 @@ class RENINeuSModel(NeuSModel):
             self.illumination_field_train = RENIField(self.config.reni_path, num_latent_codes=self.num_train_data)
             self.illumination_field_eval = RENIField(self.config.reni_path, num_latent_codes=self.num_eval_data)
 
-        if self.config.background_model == "grid":
-            # overwrite background model with albdeo field
-            self.field_background = TCNNRENINerfactoAlbedoField(
-                self.scene_box.aabb,
-                spatial_distortion=self.scene_contraction,
-                num_images=self.num_train_data,
-                use_visibility=self.config.predict_visibility,
-            )
+        # if self.config.background_model == "grid":
+        #     # overwrite background model with albdeo field
+        #     self.field_background = TCNNRENINerfactoAlbedoField(
+        #         self.scene_box.aabb,
+        #         spatial_distortion=self.scene_contraction,
+        #         num_images=self.num_train_data,
+        #         use_visibility=self.config.predict_visibility,
+        #     )
 
         self.density_fns = []
         num_prop_nets = self.config.num_proposal_iterations
@@ -292,23 +292,6 @@ class RENINeuSModel(NeuSModel):
             "ray_samples_list": ray_samples_list,
         }
 
-        # background model
-        if self.config.background_model != "none":
-            # sample inversely from far to 1000 and points and forward the bg model
-            ray_bundle.nears = ray_bundle.fars
-            ray_bundle.fars = torch.ones_like(ray_bundle.fars) * self.config.far_plane_bg
-
-            ray_samples_bg = self.sampler_bg(ray_bundle)
-            # use the same background model for both density field and occupancy field
-            field_outputs_bg = self.field_background(ray_samples_bg, True, illumination_directions)
-            weights_bg = ray_samples_bg.get_weights(field_outputs_bg[FieldHeadNames.DENSITY])
-
-            samples_and_field_outputs["ray_samples_bg"] = ray_samples_bg
-            samples_and_field_outputs["field_outputs_bg"] = field_outputs_bg
-            samples_and_field_outputs["weights_bg"] = weights_bg
-
-            camera_indices = torch.cat([camera_indices, ray_samples_bg.camera_indices.squeeze()], dim=1)
-
         # Get illumination for samples
         hdr_light_colours, light_directions = illumination_field(
             camera_indices, None, illumination_directions, "illumination"
@@ -323,6 +306,32 @@ class RENINeuSModel(NeuSModel):
         samples_and_field_outputs["light_directions"] = light_directions
         samples_and_field_outputs["background_colours"] = background_colours
 
+        # background model
+        if self.config.background_model != "none":
+            # sample inversely from far to far_plane_bg and points and forward the bg model
+            ray_bundle.nears = ray_bundle.fars
+            ray_bundle.fars = torch.ones_like(ray_bundle.fars) * self.config.far_plane_bg
+
+            ray_samples_bg = self.sampler_bg(ray_bundle)
+            # use the same background model for both density field and occupancy field
+            field_outputs_bg = self.field_background(ray_samples_bg, True, illumination_directions)
+            weights_bg = ray_samples_bg.get_weights(field_outputs_bg[FieldHeadNames.DENSITY])
+
+            samples_and_field_outputs["ray_samples_bg"] = ray_samples_bg
+            samples_and_field_outputs["field_outputs_bg"] = field_outputs_bg
+            samples_and_field_outputs["weights_bg"] = weights_bg
+            samples_and_field_outputs["visibility_bg"] = field_outputs_bg[FieldHeadNames.VISIBILITY]
+
+            camera_indices = ray_samples_bg.camera_indices.squeeze()  # [num_rays, samples_per_ray]
+
+            # Get illumination for samples
+            hdr_light_colours_bg, light_directions_bg = illumination_field(
+                camera_indices, None, illumination_directions, "illumination"
+            )
+
+            samples_and_field_outputs["hdr_light_colours_bg"] = hdr_light_colours_bg
+            samples_and_field_outputs["light_directions_bg"] = light_directions_bg
+
         return samples_and_field_outputs
 
     def get_outputs(self, ray_bundle: RayBundle) -> Dict:
@@ -332,26 +341,17 @@ class RENINeuSModel(NeuSModel):
 
         samples_and_field_outputs = self.sample_and_forward_field(ray_bundle=ray_bundle)
 
-        # Shotscuts
+        # Shortcuts
         field_outputs = samples_and_field_outputs["field_outputs"]
         ray_samples = samples_and_field_outputs["ray_samples"]
         weights = samples_and_field_outputs["weights"]
         hdr_light_colours = samples_and_field_outputs["hdr_light_colours"]
         light_directions = samples_and_field_outputs["light_directions"]
         background_colours = samples_and_field_outputs["background_colours"]
+
         albedos = field_outputs[FieldHeadNames.ALBEDO]
         normals = field_outputs[FieldHeadNames.NORMAL]
         visibility = field_outputs[FieldHeadNames.VISIBILITY] if self.config.predict_visibility else None
-
-        if self.config.background_model != "none":
-            albedos = torch.cat([albedos, samples_and_field_outputs["field_outputs_bg"][FieldHeadNames.ALBEDO]], dim=1)
-            normals = torch.cat(
-                [normals, samples_and_field_outputs["field_outputs_bg"][FieldHeadNames.PRED_NORMALS]], dim=1
-            )
-            visibility = torch.cat(
-                [visibility, samples_and_field_outputs["field_outputs_bg"][FieldHeadNames.VISIBILITY]], dim=1
-            )
-            weights = torch.cat([weights, samples_and_field_outputs["weights_bg"]], dim=1)
 
         rgb = self.lambertian_renderer(
             albedos=albedos,
@@ -363,13 +363,38 @@ class RENINeuSModel(NeuSModel):
             weights=weights,
         )
 
+        if self.config.background_model != "none":
+            # Shortcuts
+            field_outputs_bg = samples_and_field_outputs["field_outputs_bg"]
+            ray_samples_bg = samples_and_field_outputs["ray_samples_bg"]
+            weights_bg = samples_and_field_outputs["weights_bg"]
+            hdr_light_colours_bg = samples_and_field_outputs["hdr_light_colours_bg"]
+            light_directions_bg = samples_and_field_outputs["light_directions_bg"]
+            visibility_bg = samples_and_field_outputs["visibility_bg"] if self.config.predict_visibility else None
+            bg_transmittance = samples_and_field_outputs["bg_transmittance"]
+
+            albedos_bg = field_outputs_bg[FieldHeadNames.ALBEDO]
+            normals_bg = field_outputs_bg[FieldHeadNames.PRED_NORMALS]
+
+            rgb_bg = self.lambertian_renderer(
+                albedos=albedos_bg,
+                normals=normals_bg,
+                light_directions=light_directions_bg,
+                light_colors=hdr_light_colours_bg,
+                visibility=visibility_bg,
+                background_color=background_colours,
+                weights=weights_bg,
+            )
+
+            rgb = rgb + bg_transmittance * rgb_bg
+
         albedo = self.renderer_rgb(
             rgb=albedos,
             background_color=torch.ones_like(background_colours),
             weights=weights,
         )
 
-        depth = self.renderer_depth(weights=samples_and_field_outputs["weights"], ray_samples=ray_samples)
+        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
         # the rendered depth is point-to-point distance and we should convert to depth
         depth = depth / ray_bundle.directions_norm
 
@@ -390,6 +415,7 @@ class RENINeuSModel(NeuSModel):
 
         if self.config.predict_visibility:
             outputs["visibility"] = self.renderer_accumulation(weights=visibility)
+            outputs["visibility"] = visibility
 
         if self.training:
             grad_points = field_outputs[FieldHeadNames.GRADIENT]
@@ -420,13 +446,16 @@ class RENINeuSModel(NeuSModel):
                 raise ValueError(f"NaNs in output {k}")
 
         if self.config.background_model != "none":
-            depth_bg = self.renderer_depth(
-                weights=samples_and_field_outputs["weights_bg"], ray_samples=samples_and_field_outputs["ray_samples_bg"]
-            )
-            accumulation_bg = self.renderer_accumulation(weights=samples_and_field_outputs["weights_bg"])
+            depth_bg = self.renderer_depth(weights=weights_bg, ray_samples=ray_samples_bg)
+            accumulation_bg = self.renderer_accumulation(weights=weights_bg)
 
             outputs["depth_bg"] = depth_bg
             outputs["accumulation_bg"] = accumulation_bg
+            outputs["weights_bg"] = weights_bg
+            outputs["rgb_bg"] = rgb_bg
+
+            if self.config.predict_visibility:
+                outputs["visibility_bg"] = self.renderer_accumulation(weights=visibility_bg)
 
         return outputs
 
@@ -453,13 +482,22 @@ class RENINeuSModel(NeuSModel):
                         * self.config.reni_loss_mult
                     )
 
+                # foreground mask loss
+                if self.config.background_model != "none":
+                    if self.config.fg_mask_loss_mult > 0.0:
+                        w = outputs["weights_bg"]
+                        weights_sum = w.sum(dim=1).clip(1e-3, 1.0 - 1e-3)
+                        loss_dict["bg_mask_loss"] = (
+                            F.binary_cross_entropy_with_logits(weights_sum, fg_label) * self.config.fg_mask_loss_mult
+                        )
+
             if self.config.predict_visibility:
                 # binary_cross_entropy_with_logits between field_outputs[FieldHeadNames.VISIBILITY] which is shape
                 # [K, D, 1] and 1.0 - fg_label which is shape [K, 1] so we need to unsqueeze the fg_label
                 loss_dict["visibility_loss"] = (
                     F.binary_cross_entropy_with_logits(
                         outputs["visibility"],
-                        1.0 - fg_label,
+                        1.0 - fg_label.unsqueeze(1).repeat(1, outputs["visibility"].shape[1], 1),
                     )
                     * self.config.visibility_loss_mult
                 )
