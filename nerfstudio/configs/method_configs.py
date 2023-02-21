@@ -839,7 +839,7 @@ method_configs["RENI-Nerfacto"] = Config(
             fg_mask_loss_mult=1.0,
             reni_loss_weight=1.0,
             far_plane=20.0,
-            predict_visibility=True,
+            use_visibility=True,
             visibility_loss_mult=1.0,
             # reni_cosine_loss_weight=0.1,
             # reni_prior_loss_weight=0.1,
@@ -898,8 +898,8 @@ method_configs["RENI-NeuS"] = Config(
                 bias=0.5,
                 beta_init=0.3,
                 use_appearance_embedding=False,
-                inside_outside=False,  # This is for outdoor scenes
-                use_visibility=True,
+                inside_outside=False,  # False is for outdoor scenes
+                use_visibility=False,
             ),
             eval_num_rays_per_chunk=512,
             fg_mask_loss_mult=1.0,
@@ -908,7 +908,6 @@ method_configs["RENI-NeuS"] = Config(
             near_plane=0.05,
             far_plane=100.0,
             far_plane_bg=1000.0,
-            predict_visibility=True,
             visibility_loss_mult=0.5,
             background_model="none",
             use_average_appearance_embedding=False,
@@ -920,11 +919,11 @@ method_configs["RENI-NeuS"] = Config(
     ),
     optimizers={
         "proposal_networks": {
-            "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=1.0, max_steps=100000),
         },
         "fields": {
-            "optimizer": AdamOptimizerConfig(lr=1e-4, eps=1e-15),
+            "optimizer": AdamOptimizerConfig(lr=1e-3, eps=1e-15),
             "scheduler": NeuSSchedulerConfig(warm_up_end=500, learning_rate_alpha=1.0, max_steps=100000),
         },
         "field_background": {

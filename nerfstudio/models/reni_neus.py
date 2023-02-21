@@ -40,7 +40,6 @@ from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.fields.nerfacto_albedo_visibility_field import (
     TCNNRENINerfactoAlbedoField,
 )
-from nerfstudio.fields.nerfacto_field import TCNNNerfactoField
 from nerfstudio.fields.reni_field import get_directions, get_sineweight
 from nerfstudio.fields.reni_field_new import RENIField
 from nerfstudio.model_components.illumination_samplers import IcosahedronSampler
@@ -52,7 +51,7 @@ from nerfstudio.model_components.losses import (
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler
 from nerfstudio.model_components.renderers import (
     RGBLambertianRendererWithVisibility,
-    RGBRendererWithRENI,
+    RGBRenderer,
 )
 from nerfstudio.models.neus import NeuSModel, NeuSModelConfig
 from nerfstudio.utils import colormaps
@@ -105,8 +104,6 @@ class RENINeuSModelConfig(NeuSModelConfig):
     """Weight for the reni loss"""
     orientation_loss_mult: float = 0.0001
     """Orientation loss multipier on computed noramls."""
-    predict_visibility: bool = True
-    """Whether to predict visibility or not"""
     visibility_loss_mult: float = 0.01
     """Weight for the visibility loss"""
     illumination_field: Literal["reni", "SH"] = "reni"  # "SH" NOT IMPLEMENTED
@@ -153,6 +150,7 @@ class RENINeuSModel(NeuSModel):
         """Set the fields and modules."""
         super().populate_modules()
         self.use_average_appearance_embedding = False
+        self.use_visibility = getattr(self.field, "use_visibility", False)
 
         # illumination sampler
         if self.config.illumination_sampler == "icosahedron":
@@ -163,14 +161,14 @@ class RENINeuSModel(NeuSModel):
             self.illumination_field_train = RENIField(self.config.reni_path, num_latent_codes=self.num_train_data)
             self.illumination_field_eval = RENIField(self.config.reni_path, num_latent_codes=self.num_eval_data)
 
-        # if self.config.background_model == "grid":
-        #     # overwrite background model with albdeo field
-        #     self.field_background = TCNNRENINerfactoAlbedoField(
-        #         self.scene_box.aabb,
-        #         spatial_distortion=self.scene_contraction,
-        #         num_images=self.num_train_data,
-        #         use_visibility=self.config.predict_visibility,
-        #     )
+        if self.config.background_model == "grid":
+            # overwrite background model with albdeo field
+            self.field_background = TCNNRENINerfactoAlbedoField(
+                self.scene_box.aabb,
+                spatial_distortion=self.scene_contraction,
+                num_images=self.num_train_data,
+                use_visibility=self.use_visibility,
+            )
 
         self.density_fns = []
         num_prop_nets = self.config.num_proposal_iterations
@@ -207,7 +205,7 @@ class RENINeuSModel(NeuSModel):
             update_sched=update_schedule,
         )
 
-        self.renderer_rgb = RGBRendererWithRENI()
+        self.albedo_renderer = RGBRenderer(background_color=torch.tensor([1.0, 1.0, 1.0]))
         self.lambertian_renderer = RGBLambertianRendererWithVisibility()
 
         if self.config.illumination_field == "reni":
@@ -351,7 +349,7 @@ class RENINeuSModel(NeuSModel):
 
         albedos = field_outputs[FieldHeadNames.ALBEDO]
         normals = field_outputs[FieldHeadNames.NORMAL]
-        visibility = field_outputs[FieldHeadNames.VISIBILITY] if self.config.predict_visibility else None
+        visibility = field_outputs[FieldHeadNames.VISIBILITY] if self.use_visibility else None
 
         rgb = self.lambertian_renderer(
             albedos=albedos,
@@ -370,7 +368,7 @@ class RENINeuSModel(NeuSModel):
             weights_bg = samples_and_field_outputs["weights_bg"]
             hdr_light_colours_bg = samples_and_field_outputs["hdr_light_colours_bg"]
             light_directions_bg = samples_and_field_outputs["light_directions_bg"]
-            visibility_bg = samples_and_field_outputs["visibility_bg"] if self.config.predict_visibility else None
+            visibility_bg = samples_and_field_outputs["visibility_bg"] if self.use_visibility else None
             bg_transmittance = samples_and_field_outputs["bg_transmittance"]
 
             albedos_bg = field_outputs_bg[FieldHeadNames.ALBEDO]
@@ -388,9 +386,8 @@ class RENINeuSModel(NeuSModel):
 
             rgb = rgb + bg_transmittance * rgb_bg
 
-        albedo = self.renderer_rgb(
+        albedo = self.albedo_renderer(
             rgb=albedos,
-            background_color=torch.ones_like(background_colours),
             weights=weights,
         )
 
@@ -413,8 +410,8 @@ class RENINeuSModel(NeuSModel):
             "directions_norm": ray_bundle.directions_norm,  # used to scale z_vals for free space and sdf loss
         }
 
-        if self.config.predict_visibility:
-            outputs["visibility"] = self.renderer_accumulation(weights=visibility)
+        if self.use_visibility:
+            outputs["accumulated_visibility"] = self.renderer_accumulation(weights=visibility)
             outputs["visibility"] = visibility
 
         if self.training:
@@ -454,7 +451,7 @@ class RENINeuSModel(NeuSModel):
             outputs["weights_bg"] = weights_bg
             outputs["rgb_bg"] = rgb_bg
 
-            if self.config.predict_visibility:
+            if self.use_visibility:
                 outputs["visibility_bg"] = self.renderer_accumulation(weights=visibility_bg)
 
         return outputs
@@ -491,7 +488,7 @@ class RENINeuSModel(NeuSModel):
                             F.binary_cross_entropy_with_logits(weights_sum, fg_label) * self.config.fg_mask_loss_mult
                         )
 
-            if self.config.predict_visibility:
+            if self.use_visibility:
                 # binary_cross_entropy_with_logits between field_outputs[FieldHeadNames.VISIBILITY] which is shape
                 # [K, D, 1] and 1.0 - fg_label which is shape [K, 1] so we need to unsqueeze the fg_label
                 loss_dict["visibility_loss"] = (
@@ -520,7 +517,16 @@ class RENINeuSModel(NeuSModel):
         images_dict["albedo"] = torch.cat([outputs["albedo"]], dim=1)
 
         if "visibility" in outputs:
-            images_dict["visibility"] = torch.cat([outputs["visibility"]], dim=1)
+            images_dict["visibility"] = torch.cat([outputs["accumulated_visibility"]], dim=1)
+
+        with torch.no_grad():
+            idx = torch.tensor(batch["image_idx"], device=self.device)
+            W = 512
+            H = W // 2
+            D = get_directions(W).to(self.device)  # [B, H*W, 3]
+            envmap, _ = self.illumination_field_eval(idx, None, D, "envmap")
+            envmap = envmap.reshape(1, H, W, 3).squeeze(0)
+            images_dict["envmap"] = envmap
 
         return metrics_dict, images_dict
 
@@ -557,7 +563,9 @@ class RENINeuSModel(NeuSModel):
                     W
                 )  # [1, H*W, 3] - sineweight compensation for the irregular sampling of the equirectangular image
             elif gt_source == "image_half_sky":
+                # TODO return this information along with batch from dataparser
                 sky_colour = torch.tensor([70, 130, 180], dtype=torch.float32).to(self.device) / 255.0
+
             elif gt_source == "image_half_inverse":
                 # Re-initialise latents to zero
                 self.illumination_field_eval.reset_latents()
@@ -608,6 +616,10 @@ class RENINeuSModel(NeuSModel):
                         rgb = rgb.reshape(
                             -1, 3
                         )  # [H*W, 3] # TODO: confirm this is row-major (internet seems to think so)
+
+                        semantic_mask = batch["semantic_mask"].images[0].to(self.device)  # [H, W, 3]
+                        semantic_mask = semantic_mask[:, : semantic_mask.shape[1] // 2, :]  # [H, W//2, 3]
+                        semantic_mask = semantic_mask.reshape(-1, 3)  # [H*W, 3]
 
                         # TODO (james): need to mask transients
                         # rebuild a new RayBundle with the left half of the image

@@ -422,8 +422,7 @@ class NeRFOSR(DataParser):
                 fg_mask = torch.ones_like(segmentation_image[:, :, 0])
 
                 mask = torch.where(
-                    torch.all(torch.eq(segmentation_image, colors[classes.index("vegetation")]), dim=2)
-                    | torch.all(torch.eq(segmentation_image, colors[classes.index("person")]), dim=2)
+                    torch.all(torch.eq(segmentation_image, colors[classes.index("person")]), dim=2)
                     | torch.all(torch.eq(segmentation_image, colors[classes.index("rider")]), dim=2)
                     | torch.all(torch.eq(segmentation_image, colors[classes.index("car")]), dim=2)
                     | torch.all(torch.eq(segmentation_image, colors[classes.index("truck")]), dim=2)

@@ -578,3 +578,9 @@ class RENIField(IlluminationField):
             light_colours = self.reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
             light_colours = sRGB(light_colours)  # [num_rays, 1, 3]
             return light_colours, light_directions
+        elif illumination_type == "envmap":
+            Z, _, _ = self.reni.sample_latent(unique_indices)
+            light_colours = self.reni(Z, directions)  # [unique_indices, D, 3]
+            light_colours = self.reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
+            light_colours = sRGB(light_colours)  # [unique_indices, D, 3]
+            return light_colours, None

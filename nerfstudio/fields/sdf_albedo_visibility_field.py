@@ -262,11 +262,11 @@ class SDFAlbedoVisibilityField(Field):
         # deviation_network to compute alpha from sdf from NeuS
         self.deviation_network = SingleVarianceNetwork(init_val=self.config.beta_init)
 
-        # color network
+        # color network (albedo)
         dims = [self.config.hidden_dim_color for _ in range(self.config.num_layers_color)]
         # feature
-        # in_dim = 3 + self.position_encoding.get_out_dim() + self.encoding.n_output_dims + self.config.geo_feat_dim
         in_dim = 3 + self.config.geo_feat_dim
+        # in_dim = 3 + self.position_encoding.get_out_dim() + self.encoding.n_output_dims + self.config.geo_feat_dim
         dims = [in_dim] + dims + [3]
         self.num_layers_color = len(dims)
 
@@ -306,6 +306,7 @@ class SDFAlbedoVisibilityField(Field):
         self.softplus = nn.Softplus(beta=100)
         self.relu = nn.ReLU()
         self.sigmoid = torch.nn.Sigmoid()
+        self.exp = torch.exp
 
         self._cos_anneal_ratio = 1.0
 
@@ -429,7 +430,14 @@ class SDFAlbedoVisibilityField(Field):
         return occupancy
 
     def get_albedo(self, positions_flat, geo_features):
-        """compute albedo"""
+        """compute diffuse albedo"""
+        # positions = self.spatial_distortion(positions_flat)
+        # positions = (positions + 1.0) / 2.0  # needed for SH encoding
+        # feature = self.encoding(positions)
+        # pe = self.position_encoding(positions_flat)
+        # h_pos = torch.cat((positions_flat, pe, feature), dim=-1)
+        # h = torch.cat([h_pos, geo_features.view(-1, self.config.geo_feat_dim)], dim=-1)
+
         h = torch.cat([positions_flat, geo_features.view(-1, self.config.geo_feat_dim)], dim=-1)
         for l in range(0, self.num_layers_color - 1):
             lin = getattr(self, "clin" + str(l))
@@ -441,66 +449,6 @@ class SDFAlbedoVisibilityField(Field):
 
         albedo = self.sigmoid(h)  # [num_rays * samples_per_ray, 3]
         return albedo
-
-    # def get_colors(self, albedos, normals, light_directions, light_colours, visibility=None):
-    #     """compute colors"""
-
-    #     # albedos.shape = [num_rays * samples_per_ray, 3]
-    #     # normals.shape = [num_rays, samples_per_ray, 3]
-    #     # light_directions.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
-    #     # light_colours.shape = [num_rays * samples_per_ray, num_reni_directions, 3]
-
-    #     normals = normals.view(-1, 3)
-
-    #     max_chunk_size = 200000
-
-    #     if albedos.shape[0] > max_chunk_size:
-    #         num_chunks = albedos.shape[0] // max_chunk_size + 1
-
-    #         color_chunks = []
-    #         for i in range(num_chunks):
-    #             albedos_chunk = albedos[i * max_chunk_size : (i + 1) * max_chunk_size]
-    #             normals_chunk = normals[i * max_chunk_size : (i + 1) * max_chunk_size]
-    #             light_directions_chunk = light_directions[i * max_chunk_size : (i + 1) * max_chunk_size]
-    #             light_colours_chunk = light_colours[i * max_chunk_size : (i + 1) * max_chunk_size]
-
-    #             dot_prod = torch.einsum(
-    #                 "bi,bji->bj", normals_chunk, light_directions_chunk
-    #             )  # [num_rays * samples_per_ray, num_reni_directions]
-
-    #             dot_prod = torch.clamp(dot_prod, 0, 1)
-
-    #             if visibility is not None:
-    #                 visibility_chunk = visibility[i * max_chunk_size : (i + 1) * max_chunk_size]
-    #                 dot_prod = dot_prod * visibility_chunk
-
-    #             color_chunk = torch.einsum(
-    #                 "bi,bj,bji->bi", albedos_chunk, dot_prod, light_colours_chunk
-    #             )  # [num_rays * samples_per_ray, 3]
-
-    #             color_chunks.append(color_chunk)
-
-    #         color = torch.cat(color_chunks, dim=0)
-
-    #     else:
-    #         # compute dot product between normals [num_rays * samples_per_ray, 3] and light directions [num_rays * samples_per_ray, num_reni_directions, 3]
-    #         dot_prod = torch.einsum(
-    #             "bi,bji->bj", normals, light_directions
-    #         )  # [num_rays * samples_per_ray, num_reni_directions]
-
-    #         # clamp dot product values to be between 0 and 1
-    #         dot_prod = torch.clamp(dot_prod, 0, 1)
-
-    #         if visibility is not None:
-    #             # Apply the visibility mask to the dot product
-    #             dot_prod = dot_prod * visibility
-
-    #         # compute final color by multiplying dot product with albedo color and light color
-    #         color = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colours)  # [num_rays * samples_per_ray, 3]
-
-    #     color = sRGB(color)
-
-    #     return color
 
     def get_outputs(
         self, ray_samples: RaySamples, return_alphas=False, return_occupancy=False, illumination_directions=None

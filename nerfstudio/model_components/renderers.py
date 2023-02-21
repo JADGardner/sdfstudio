@@ -157,7 +157,8 @@ class RGBLambertianRendererWithVisibility(nn.Module):
         """
         albedos = albedos.view(-1, 3)
         normals = normals.view(-1, 3)
-        visibility = visibility.view(-1, 1)
+        if visibility is not None:
+            visibility = visibility.view(-1, 1)
 
         max_chunk_size = 200000
 
@@ -205,9 +206,7 @@ class RGBLambertianRendererWithVisibility(nn.Module):
             # compute final color by multiplying dot product with albedo color and light color
             color = torch.einsum("bi,bj,bji->bi", albedos, dot_prod, light_colors)  # [num_rays * samples_per_ray, 3]
 
-        radiance = sRGB(color)
-
-        radiance = radiance.view(*weights.shape[:-1], 3)
+        radiance = color.view(*weights.shape[:-1], 3)
 
         if ray_indices is not None and num_rays is not None:
             # Necessary for packed samples from volumetric ray sampler
@@ -220,6 +219,7 @@ class RGBLambertianRendererWithVisibility(nn.Module):
             accumulated_weight = torch.sum(weights, dim=-2)
 
         assert isinstance(background_color, torch.Tensor)
+        comp_rgb = sRGB(comp_rgb)
         comp_rgb = comp_rgb + background_color.to(weights.device) * (1.0 - accumulated_weight)
 
         return comp_rgb
@@ -269,85 +269,85 @@ class RGBLambertianRendererWithVisibility(nn.Module):
         return rgb
 
 
-class RGBRendererWithRENI(nn.Module):
-    """Standard volumetic rendering.
+# class RGBRendererWithRENI(nn.Module):
+#     """Standard volumetic rendering.
 
-    Args:
-        background_color: Background color provided externally.
-    """
+#     Args:
+#         background_color: Background color provided externally.
+#     """
 
-    def __init__(self) -> None:
-        super().__init__()
+#     def __init__(self) -> None:
+#         super().__init__()
 
-    @classmethod
-    def combine_rgb(
-        cls,
-        rgb: TensorType["bs":..., "num_samples", 3],
-        weights: TensorType["bs":..., "num_samples", 1],
-        background_color: TensorType["bs":..., "num_samples", 3],
-        ray_indices: Optional[TensorType["num_samples"]] = None,
-        num_rays: Optional[int] = None,
-    ) -> TensorType["bs":..., 3]:
-        """Composite samples along ray and render color image
+#     @classmethod
+#     def combine_rgb(
+#         cls,
+#         rgb: TensorType["bs":..., "num_samples", 3],
+#         weights: TensorType["bs":..., "num_samples", 1],
+#         background_color: TensorType["bs":..., "num_samples", 3],
+#         ray_indices: Optional[TensorType["num_samples"]] = None,
+#         num_rays: Optional[int] = None,
+#     ) -> TensorType["bs":..., 3]:
+#         """Composite samples along ray and render color image
 
-        Args:
-            rgb: RGB for each sample
-            weights: Weights for each sample
-            background_color: Background color as RGB.
-            ray_indices: Ray index for each sample, used when samples are packed.
-            num_rays: Number of rays, used when samples are packed.
+#         Args:
+#             rgb: RGB for each sample
+#             weights: Weights for each sample
+#             background_color: Background color as RGB.
+#             ray_indices: Ray index for each sample, used when samples are packed.
+#             num_rays: Number of rays, used when samples are packed.
 
-        Returns:
-            Outputs rgb values.
-        """
-        if ray_indices is not None and num_rays is not None:
-            # Necessary for packed samples from volumetric ray sampler
-            if background_color == "last_sample":
-                raise NotImplementedError("Background color 'last_sample' not implemented for packed samples.")
-            comp_rgb = nerfacc.accumulate_along_rays(weights, ray_indices, rgb, num_rays)
-            accumulated_weight = nerfacc.accumulate_along_rays(weights, ray_indices, None, num_rays)
-        else:
-            comp_rgb = torch.sum(weights * rgb, dim=-2)
-            accumulated_weight = torch.sum(weights, dim=-2)
+#         Returns:
+#             Outputs rgb values.
+#         """
+#         if ray_indices is not None and num_rays is not None:
+#             # Necessary for packed samples from volumetric ray sampler
+#             if background_color == "last_sample":
+#                 raise NotImplementedError("Background color 'last_sample' not implemented for packed samples.")
+#             comp_rgb = nerfacc.accumulate_along_rays(weights, ray_indices, rgb, num_rays)
+#             accumulated_weight = nerfacc.accumulate_along_rays(weights, ray_indices, None, num_rays)
+#         else:
+#             comp_rgb = torch.sum(weights * rgb, dim=-2)
+#             accumulated_weight = torch.sum(weights, dim=-2)
 
-        # if background_color == "last_sample":
-        #     background_color = rgb[..., -1, :]
-        # if background_color == "random":
-        #     background_color = torch.rand_like(comp_rgb).to(rgb.device)
+#         # if background_color == "last_sample":
+#         #     background_color = rgb[..., -1, :]
+#         # if background_color == "random":
+#         #     background_color = torch.rand_like(comp_rgb).to(rgb.device)
 
-        assert isinstance(background_color, torch.Tensor)
-        comp_rgb = comp_rgb + background_color.to(weights.device) * (1.0 - accumulated_weight)
-        # comp_rgb = background_color.to(weights.device)
+#         assert isinstance(background_color, torch.Tensor)
+#         comp_rgb = comp_rgb + background_color.to(weights.device) * (1.0 - accumulated_weight)
+#         # comp_rgb = background_color.to(weights.device)
 
-        return comp_rgb
+#         return comp_rgb
 
-    def forward(
-        self,
-        rgb: TensorType["bs":..., "num_samples", 3],
-        background_color: TensorType["bs":..., "num_samples", 3],
-        weights: TensorType["bs":..., "num_samples", 1],
-        ray_indices: Optional[TensorType["num_samples"]] = None,
-        num_rays: Optional[int] = None,
-    ) -> TensorType["bs":..., 3]:
-        """Composite samples along ray and render color image
+#     def forward(
+#         self,
+#         rgb: TensorType["bs":..., "num_samples", 3],
+#         background_color: TensorType["bs":..., "num_samples", 3],
+#         weights: TensorType["bs":..., "num_samples", 1],
+#         ray_indices: Optional[TensorType["num_samples"]] = None,
+#         num_rays: Optional[int] = None,
+#     ) -> TensorType["bs":..., 3]:
+#         """Composite samples along ray and render color image
 
-        Args:
-            rgb: RGB for each sample
-            background_color: Background color as RGB
-            weights: Weights for each sample
-            ray_indices: Ray index for each sample, used when samples are packed.
-            num_rays: Number of rays, used when samples are packed.
+#         Args:
+#             rgb: RGB for each sample
+#             background_color: Background color as RGB
+#             weights: Weights for each sample
+#             ray_indices: Ray index for each sample, used when samples are packed.
+#             num_rays: Number of rays, used when samples are packed.
 
-        Returns:
-            Outputs of rgb values.
-        """
+#         Returns:
+#             Outputs of rgb values.
+#         """
 
-        rgb = self.combine_rgb(
-            rgb, weights, background_color=background_color, ray_indices=ray_indices, num_rays=num_rays
-        )
-        if not self.training:
-            torch.clamp_(rgb, min=0.0, max=1.0)
-        return rgb
+#         rgb = self.combine_rgb(
+#             rgb, weights, background_color=background_color, ray_indices=ray_indices, num_rays=num_rays
+#         )
+#         if not self.training:
+#             torch.clamp_(rgb, min=0.0, max=1.0)
+#         return rgb
 
 
 class SHRenderer(nn.Module):

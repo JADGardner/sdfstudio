@@ -55,7 +55,7 @@ from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
     DepthRenderer,
     NormalsRenderer,
-    RGBRendererWithRENI,
+    RGBRenderer,
 )
 from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.models.base_model import Model, ModelConfig
@@ -129,7 +129,7 @@ class RENINerfactoModelConfig(ModelConfig):
     """Weight for the foreground mask loss"""
     reni_loss_weight: float = 1.0
     """Weight for the reni loss"""
-    predict_visibility: bool = True
+    use_visibility: bool = True
     """Whether to predict visibility or not"""
     visibility_loss_mult: float = 0.01
     """Weight for the visibility loss"""
@@ -183,7 +183,7 @@ class RENINerfactoModel(Model):
             num_images=self.num_train_data,
             use_pred_normals=self.config.predict_normals,
             icosphere_order=self.config.icosphere_order,
-            use_visibility=self.config.predict_visibility,
+            use_visibility=self.config.use_visibility,
         )
 
         self.density_fns = []
@@ -224,7 +224,7 @@ class RENINerfactoModel(Model):
         # Collider
         self.collider = NearFarCollider(near_plane=self.config.near_plane, far_plane=self.config.far_plane)
 
-        self.renderer_rgb = RGBRendererWithRENI()
+        self.renderer_rgb = RGBRenderer()
         self.renderer_accumulation = AccumulationRenderer()
         self.renderer_depth = DepthRenderer()
         self.renderer_normals = NormalsRenderer()
@@ -311,7 +311,7 @@ class RENINerfactoModel(Model):
             "depth": depth,
         }
 
-        if self.config.predict_visibility:
+        if self.config.use_visibility:
             outputs["accumulated_visibility"] = self.renderer_accumulation(
                 weights=field_outputs[FieldHeadNames.VISIBILITY]
             )
@@ -397,7 +397,7 @@ class RENINerfactoModel(Model):
                         F.binary_cross_entropy_with_logits(weights_sum, fg_label) * self.config.fg_mask_loss_mult
                     )
 
-                if self.config.predict_visibility:
+                if self.config.use_visibility:
                     # binary_cross_entropy_with_logits between field_outputs[FieldHeadNames.VISIBILITY] which is shape
                     # [K, D, 1] and 1.0 - fg_label which is shape [K, 1] so we need to unsqueeze the fg_label
                     loss_dict["visibility_loss"] = (
