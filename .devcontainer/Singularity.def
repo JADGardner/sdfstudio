@@ -1,5 +1,5 @@
 BootStrap: docker
-From: dromni/nerfstudio:0.1.14
+From: dromni/nerfstudio:0.1.18
 Stage: spython-base
 
 %environment

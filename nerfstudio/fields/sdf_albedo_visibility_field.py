@@ -17,7 +17,7 @@ Field for compound nerf model, adds scene contraction and image embeddings to in
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Type, Union
+from typing import Literal, Optional, Type, Union
 
 import icosphere
 import numpy as np
@@ -37,7 +37,6 @@ from nerfstudio.field_components.field_heads import DensityFieldHead, FieldHeadN
 from nerfstudio.field_components.spatial_distortions import SpatialDistortion
 from nerfstudio.fields.base_field import Field
 from nerfstudio.fields.sdf_field import SDFFieldConfig
-from nerfstudio.utils.colormaps import sRGB
 
 try:
     import tinycudann as tcnn
@@ -124,7 +123,7 @@ class SDFAlbedoVisibilityFieldConfig(SDFFieldConfig):
 
     _target: Type = field(default_factory=lambda: SDFAlbedoVisibilityField)
     icosphere_order: int = 3
-    use_visibility: bool = True
+    use_visibility: Literal["none", "mlp", "proposal_network"] = "none"
     num_layers_visibility: int = 3
     hidden_dim_visibility: int = 64
     output_dim_visibility: int = 64
@@ -280,7 +279,7 @@ class SDFAlbedoVisibilityField(Field):
             setattr(self, "clin" + str(l), lin)
 
         # explicit illumination visibility prediction
-        if self.use_visibility:
+        if self.use_visibility == "mlp":
             self.mlp_visibility = tcnn.Network(
                 n_input_dims=3
                 + self.position_encoding.get_out_dim()
@@ -377,6 +376,7 @@ class SDFAlbedoVisibilityField(Field):
         """compute alpha from sdf as in NeuS"""
         if sdf is None or gradients is None:
             inputs = ray_samples.frustums.get_start_positions()
+            inputs = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3]
             inputs.requires_grad_(True)
             with torch.enable_grad():
                 h = self.forward_geonetwork(inputs)
@@ -390,6 +390,9 @@ class SDFAlbedoVisibilityField(Field):
                 retain_graph=True,
                 only_inputs=True,
             )[0]
+
+        sdf = sdf.view(*ray_samples.frustums.directions.shape[:-1], -1)
+        gradients = gradients.view(*ray_samples.frustums.directions.shape[:-1], -1)
 
         inv_s = self.deviation_network.get_variance()  # Single parameter
 
@@ -451,11 +454,14 @@ class SDFAlbedoVisibilityField(Field):
         return albedo
 
     def get_outputs(
-        self, ray_samples: RaySamples, return_alphas=False, return_occupancy=False, illumination_directions=None
+        self,
+        ray_samples: RaySamples,
+        return_alphas=False,
+        return_occupancy=False,
+        density_only=False,
+        illumination_directions=None,
     ):  # pylint: disable=arguments-renamed
         """compute output of ray samples"""
-        if ray_samples.camera_indices is None:
-            raise AttributeError("Camera indices are not provided.")
 
         outputs = {}
 
@@ -465,10 +471,25 @@ class SDFAlbedoVisibilityField(Field):
         directions = ray_samples.frustums.directions  # [num_rays, samples_per_ray, 3] # all samples have same direction
 
         positions_flat.requires_grad_(True)
+
+        if density_only:
+            h = self.forward_geonetwork(positions_flat)
+            sdf, geo_features = torch.split(h, [1, self.config.geo_feat_dim], dim=-1)
+            density = self.laplace_density(sdf)
+            density = density.view(*ray_samples.frustums.directions.shape[:-1], -1)
+            outputs.update(
+                {
+                    FieldHeadNames.DENSITY: density,
+                    FieldHeadNames.SDF: sdf,
+                }
+            )
+            return outputs
+
         with torch.enable_grad():
             h = self.forward_geonetwork(positions_flat)
             sdf, geo_features = torch.split(h, [1, self.config.geo_feat_dim], dim=-1)
         d_output = torch.ones_like(sdf, requires_grad=False, device=sdf.device)
+
         gradients = torch.autograd.grad(
             outputs=sdf,
             inputs=positions_flat,
@@ -488,9 +509,9 @@ class SDFAlbedoVisibilityField(Field):
         albedo = self.get_albedo(positions_flat, geo_features)
 
         illumination_visibility = None
-        if self.use_visibility:
+        if self.use_visibility == "mlp":
             inputs = ray_samples.frustums.get_start_positions()
-            inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3]
+            inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3] aka [K, 3]
             positions = self.spatial_distortion(inputs_flat)
             positions = (positions + 1.0) / 2.0
             feature = self.encoding(positions)
@@ -530,13 +551,12 @@ class SDFAlbedoVisibilityField(Field):
             x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
             visibility = self.field_head_visibility(x.float())
             visibility = visibility.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
-            outputs.update({FieldHeadNames.VISIBILITY: visibility})
 
         albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
 
         outputs.update(
             {
-                FieldHeadNames.ALBEDO: albedo,
+                FieldHeadNames.RGB: albedo,
                 FieldHeadNames.DENSITY: density,
                 FieldHeadNames.SDF: sdf,
                 FieldHeadNames.NORMAL: normals,
@@ -553,8 +573,9 @@ class SDFAlbedoVisibilityField(Field):
             occupancy = self.get_occupancy(sdf)
             outputs.update({FieldHeadNames.OCCUPANCY: occupancy})
 
-        if self.use_visibility:
-            outputs.update({FieldHeadNames.VISIBILITY: visibility})
+        if self.use_visibility == "mlp":
+            outputs.update({"illumination_visibility": illumination_visibility})
+            outputs.update({"camera_sky_visibility": visibility})
 
         return outputs
 
@@ -563,6 +584,7 @@ class SDFAlbedoVisibilityField(Field):
         ray_samples: RaySamples,
         return_alphas=False,
         return_occupancy=False,
+        density_only=False,
         illumination_directions=None,
     ):  # pylint: disable=arguments-renamed
         """Evaluates the field at points along the ray.
@@ -574,6 +596,7 @@ class SDFAlbedoVisibilityField(Field):
             ray_samples,
             return_alphas=return_alphas,
             return_occupancy=return_occupancy,
+            density_only=density_only,
             illumination_directions=illumination_directions,
         )
         return field_outputs

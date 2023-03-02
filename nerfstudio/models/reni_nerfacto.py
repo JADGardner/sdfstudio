@@ -295,7 +295,7 @@ class RENINerfactoModel(Model):
         )
 
         albedo = self.renderer_rgb(
-            rgb=field_outputs[FieldHeadNames.ALBEDO],
+            rgb=field_outputs[FieldHeadNames.RGB],
             background_color=torch.ones_like(field_outputs[FieldHeadNames.ILLUMINATION]),
             weights=weights,
         )

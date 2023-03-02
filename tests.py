@@ -535,3 +535,75 @@ conditioning_input = torch.cat((z_xz_invar, z_y), 2)  # [B, npix, ndims^2 + ndim
 
 
 model_input_concat = torch.cat((innerprod, z_xz_invar, d_xz_norm, z_y, d_y), 2)
+
+import matplotlib.pyplot as plt
+
+# %%
+import torch
+from PIL import Image
+from torchvision.transforms import ToTensor
+
+img = "/workspaces/sdfstudio/outputs/data-NeRF-OSR-Data/RENI-NeuS/2023-02-27_121840/wandb/latest-run/files/media/images/Eval Images/visibility_100_988b2a7899666cd8a0c1.png"
+
+img = Image.open(img)
+img = ToTensor()(img)
+
+# H, W = img.shape[1], img.shape[2]
+# img = img.reshape(-1, 3)
+# img = img.permute(1, 0)
+# img = img.reshape(H, W, 3)
+img = img.permute(1, 2, 0)
+
+# now reshape back but using row-major order
+# %%
+plt.imshow(img.cpu().numpy())
+import icosphere
+import torch
+from scipy.spatial.transform import Rotation
+
+# %%
+from nerfstudio.model_components.illumination_samplers import IcosahedronSampler
+
+# %%
+random_rotations = torch.eye(3).repeat(10, 1, 1)  # [n, 3, 3]
+random_rotations[:, :3, :3] = torch.from_numpy(Rotation.random(10).as_matrix())
+# %%
+vertices, _ = icosphere.icosphere(3)
+# %%
+# plot vertices using plotly as points
+import plotly.graph_objects as go
+
+fig = go.Figure(data=[go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode="markers")])
+fig.show()
+# %%
+sampler = IcosahedronSampler(3, True, True)
+vertices = sampler.generate_direction_samples(5)
+
+# %%
+vertices, _ = icosphere.icosphere(3)  # [K, 3] and random rotations [N, 3, 3]
+vertices = torch.from_numpy(vertices).float()
+# unsqueeze to [1, K, 3] and repeat to [N, K, 3] and then apply rotations
+vertices = vertices.unsqueeze(0).repeat(10, 1, 1)
+vertices = torch.bmm(vertices, random_rotations)
+
+# remove lower
+# %%
+vertices, _ = icosphere.icosphere(3)  # [K, 3]
+R = torch.from_numpy(Rotation.random(1).as_matrix())[0].float()
+vertices = torch.from_numpy(vertices).float()
+vertices = vertices @ R
+# %%
+# remove lower hemisphere of vertices
+vertices = vertices[vertices[:, 2] > 0]
+# %%
+fig = go.Figure(data=[go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode="markers")])
+fig.show()
+import plotly.graph_objects as go
+
+# %%
+from nerfstudio.model_components.illumination_samplers import IcosahedronSampler
+
+sampler = IcosahedronSampler(4, True, True)
+vertices = sampler.generate_direction_samples()
+vertices.shape
+# %%

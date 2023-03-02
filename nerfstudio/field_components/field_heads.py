@@ -29,10 +29,6 @@ class FieldHeadNames(Enum):
     """Possible field outputs"""
 
     RGB = "rgb"
-    ALBEDO = "albedo"
-    RADIANCE = "radiance"
-    ILLUMINATION = "illumination"
-    VISIBILITY = "visibility"
     SH = "sh"
     DENSITY = "density"
     NORMALS = "normals"

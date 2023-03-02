@@ -870,7 +870,7 @@ method_configs["RENI-Nerfacto"] = Config(
 method_configs["RENI-NeuS"] = Config(
     method_name="RENI-NeuS",
     trainer=TrainerConfig(
-        steps_per_eval_image=1000,
+        steps_per_eval_image=500,
         steps_per_eval_batch=5000,
         steps_per_save=20000,
         steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
@@ -880,8 +880,8 @@ method_configs["RENI-NeuS"] = Config(
     pipeline=FitEvalLatentsPipelineConfig(
         datamanager=VanillaDataManagerConfig(
             dataparser=NeRFOSRDataParserConfig(),
-            train_num_rays_per_batch=512,
-            eval_num_rays_per_batch=512,
+            train_num_rays_per_batch=256,
+            eval_num_rays_per_batch=256,
             camera_optimizer=CameraOptimizerConfig(
                 mode="off", optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2)
             ),
@@ -899,19 +899,19 @@ method_configs["RENI-NeuS"] = Config(
                 beta_init=0.3,
                 use_appearance_embedding=False,
                 inside_outside=False,  # False is for outdoor scenes
-                use_visibility=False,
+                use_visibility="sdf",
             ),
-            eval_num_rays_per_chunk=512,
+            eval_num_rays_per_chunk=256,
             fg_mask_loss_mult=1.0,
             reni_loss_mult=1.0,
             reni_path="checkpoints/reni_pretrained_weights/latent_dim_36_net_5_256_vad_cbc_tanh_hdr/version_0/checkpoints/fit_decoder_epoch=1579.ckpt",
             near_plane=0.05,
             far_plane=100.0,
             far_plane_bg=1000.0,
-            visibility_loss_mult=0.5,
+            visibility_loss_mse_mult=1.0,
             background_model="none",
             use_average_appearance_embedding=False,
-            icosphere_order=2,
+            icosphere_order=1,
         ),
         eval_latent_optimisation_source="image_half_inverse",
         eval_latent_optimisation_epochs=50,

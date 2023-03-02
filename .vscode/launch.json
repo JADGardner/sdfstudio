@@ -82,7 +82,9 @@
       "console": "integratedTerminal",
       "args": ["RENI-NeuS",
                "--vis", "tensorboard",
-               "nerfosr-data"]
+               "nerfosr-data",
+               "--scene", "lk2",
+               "--use-session-data", "False"]
     },
     {
       "name": "Python: train RENI-NeuS nerf-osr with mask",
@@ -180,15 +182,19 @@
       "args": ["semantic_nerf"]
     },
     {
-      "name": "Python: train neus-facto with mask",
+      "name": "Python: train neus-facto nerfosr",
       "type": "python",
       "request": "launch",
       "program": "scripts/train.py",
       "console": "integratedTerminal",
       "args": ["neus-facto",
-               "sdfstudio-data",
-               "--data", "data/sdfstudio-demo-data/dtu-scan65",
-               "--include-foreground-mask", "True"]
+               "--pipeline.model.sdf-field.inside-outside", "False",
+               "--pipeline.model.sdf-field.use-appearance-embedding", "True",
+               "--pipeline.model.fg_mask_loss_mult", "1.0",
+               "--pipeline.model.background-model", "mlp",
+               "nerfosr-data",
+               "--scene", "lk2",
+               "--use-session-data", "False"]
     },
     {
       "name": "Python: train neus-facto nuscenes with mask",

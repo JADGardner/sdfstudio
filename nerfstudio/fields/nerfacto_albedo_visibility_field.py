@@ -19,7 +19,6 @@ Field for compound nerf model, adds scene contraction and image embeddings to in
 
 from typing import Dict, Optional, Tuple
 
-import icosphere
 import numpy as np
 import torch
 from torch import nn
@@ -44,7 +43,6 @@ from nerfstudio.field_components.spatial_distortions import (
     SpatialDistortion,
 )
 from nerfstudio.fields.base_field import Field
-from nerfstudio.utils.colormaps import sRGB
 
 try:
     import tinycudann as tcnn
@@ -305,7 +303,7 @@ class TCNNRENINerfactoAlbedoField(Field):
 
         albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
 
-        outputs.update({FieldHeadNames.ALBEDO: albedo})
+        outputs.update({FieldHeadNames.RGB: albedo})
 
         # check if nan in rgb
         if torch.isnan(albedo).any():
@@ -335,6 +333,7 @@ class TCNNRENINerfactoAlbedoField(Field):
             illumination_visibility = illumination_visibility.view(
                 -1, illumination_directions.shape[0], 1
             ).squeeze()  # [K, D]
+            outputs.update({"illumination_visibility": illumination_visibility})
 
             # now for camera rays to apply loss from sky masks
             if self.spatial_distortion is not None:
@@ -352,7 +351,7 @@ class TCNNRENINerfactoAlbedoField(Field):
             x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
             visibility = self.field_head_visibility(x.float())
             visibility = visibility.view(positions.shape[0], positions.shape[1], 1)  # [K, D, 1]
-            outputs.update({FieldHeadNames.VISIBILITY: visibility})
+            outputs.update({"camera_sky_visibility_bg": visibility})
 
         return outputs
 

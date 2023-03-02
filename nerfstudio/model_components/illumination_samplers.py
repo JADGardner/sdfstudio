@@ -21,6 +21,7 @@ from typing import Optional
 
 import icosphere
 import torch
+from scipy.spatial.transform import Rotation
 from torch import nn
 
 
@@ -58,12 +59,25 @@ class IlluminationSampler(nn.Module):
 class IcosahedronSampler(IlluminationSampler):
     """For sampling directions from an icosahedron."""
 
-    def __init__(self, icosphere_order: int = 2):
+    def __init__(
+        self, icosphere_order: int = 2, apply_random_rotation: bool = False, remove_lower_hemisphere: bool = False
+    ):
         super().__init__()
         self.icosphere_order = icosphere_order
+        self.apply_random_rotation = apply_random_rotation
+        self.remove_lower_hemisphere = remove_lower_hemisphere
 
         vertices, _ = icosphere.icosphere(self.icosphere_order)
         self.directions = torch.from_numpy(vertices).float()  # [N, 3], # Z is up
 
     def generate_direction_samples(self, num_directions=None) -> torch.Tensor:
-        return self.directions
+        # generate N random rotations
+        directions = self.directions
+        if self.apply_random_rotation:
+            R = torch.from_numpy(Rotation.random(1).as_matrix())[0].float()
+            directions = directions @ R
+
+        if self.remove_lower_hemisphere:
+            directions = directions[directions[:, 2] > 0]
+
+        return directions
