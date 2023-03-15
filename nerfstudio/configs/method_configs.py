@@ -870,7 +870,7 @@ method_configs["RENI-Nerfacto"] = Config(
 method_configs["RENI-NeuS"] = Config(
     method_name="RENI-NeuS",
     trainer=TrainerConfig(
-        steps_per_eval_image=500,
+        steps_per_eval_image=10000,
         steps_per_eval_batch=5000,
         steps_per_save=20000,
         steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
@@ -899,7 +899,7 @@ method_configs["RENI-NeuS"] = Config(
                 beta_init=0.3,
                 use_appearance_embedding=False,
                 inside_outside=False,  # False is for outdoor scenes
-                use_visibility="sdf",
+                use_visibility="none",
             ),
             eval_num_rays_per_chunk=256,
             fg_mask_loss_mult=1.0,

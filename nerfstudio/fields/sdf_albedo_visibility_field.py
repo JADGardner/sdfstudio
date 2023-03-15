@@ -353,6 +353,13 @@ class SDFAlbedoVisibilityField(Field):
         sdf, _ = torch.split(h, [1, self.config.geo_feat_dim], dim=-1)
         return sdf
 
+    def get_sdf_at_pos(self, positions):
+        """predict the sdf value for ray samples"""
+        positions_flat = positions.view(-1, 3)
+        h = self.forward_geonetwork(positions_flat)
+        sdf, _ = torch.split(h, [1, self.config.geo_feat_dim], dim=-1)
+        return sdf
+
     def gradient(self, x):
         """compute the gradient of the ray"""
         x.requires_grad_(True)
@@ -458,7 +465,6 @@ class SDFAlbedoVisibilityField(Field):
         ray_samples: RaySamples,
         return_alphas=False,
         return_occupancy=False,
-        density_only=False,
         illumination_directions=None,
     ):  # pylint: disable=arguments-renamed
         """compute output of ray samples"""
@@ -471,19 +477,6 @@ class SDFAlbedoVisibilityField(Field):
         directions = ray_samples.frustums.directions  # [num_rays, samples_per_ray, 3] # all samples have same direction
 
         positions_flat.requires_grad_(True)
-
-        if density_only:
-            h = self.forward_geonetwork(positions_flat)
-            sdf, geo_features = torch.split(h, [1, self.config.geo_feat_dim], dim=-1)
-            density = self.laplace_density(sdf)
-            density = density.view(*ray_samples.frustums.directions.shape[:-1], -1)
-            outputs.update(
-                {
-                    FieldHeadNames.DENSITY: density,
-                    FieldHeadNames.SDF: sdf,
-                }
-            )
-            return outputs
 
         with torch.enable_grad():
             h = self.forward_geonetwork(positions_flat)
@@ -508,7 +501,7 @@ class SDFAlbedoVisibilityField(Field):
 
         albedo = self.get_albedo(positions_flat, geo_features)
 
-        illumination_visibility = None
+        sky_visibility_sample = None
         if self.use_visibility == "mlp":
             inputs = ray_samples.frustums.get_start_positions()
             inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3] aka [K, 3]
@@ -529,10 +522,10 @@ class SDFAlbedoVisibilityField(Field):
             positions_flat = positions_flat.view(-1, positions_flat.shape[-1])  # [K * D, 16]
             visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
             x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
-            illumination_visibility = self.field_head_visibility(x.float())
-            illumination_visibility = illumination_visibility.view(
-                -1, illumination_directions.shape[0], 1
-            ).squeeze()  # [K, D]
+            sky_visibility_sample = self.field_head_visibility(x.float())
+            sky_visibility_sample = sky_visibility_sample.view(
+                -1, sky_visibility_sample.shape[0], 1
+            ).squeeze()  # [K, D] aka [num_rays * samples_per_ray, num_illumination_directions]
 
             # now for camera rays to apply loss from sky masks
             inputs = ray_samples.frustums.get_start_positions()
@@ -549,8 +542,8 @@ class SDFAlbedoVisibilityField(Field):
             density_emb = geo_features.view(-1, self.config.geo_feat_dim)  # [K, 15]
             visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
             x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
-            visibility = self.field_head_visibility(x.float())
-            visibility = visibility.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
+            sky_visibility_camera_ray = self.field_head_visibility(x.float())
+            sky_visibility_camera_ray = sky_visibility_camera_ray.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
 
         albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
 
@@ -574,8 +567,8 @@ class SDFAlbedoVisibilityField(Field):
             outputs.update({FieldHeadNames.OCCUPANCY: occupancy})
 
         if self.use_visibility == "mlp":
-            outputs.update({"illumination_visibility": illumination_visibility})
-            outputs.update({"camera_sky_visibility": visibility})
+            outputs.update({"sky_visibility_sample": sky_visibility_sample})
+            outputs.update({"sky_visibility_camera_ray": sky_visibility_camera_ray})
 
         return outputs
 
@@ -584,7 +577,6 @@ class SDFAlbedoVisibilityField(Field):
         ray_samples: RaySamples,
         return_alphas=False,
         return_occupancy=False,
-        density_only=False,
         illumination_directions=None,
     ):  # pylint: disable=arguments-renamed
         """Evaluates the field at points along the ray.
@@ -596,7 +588,6 @@ class SDFAlbedoVisibilityField(Field):
             ray_samples,
             return_alphas=return_alphas,
             return_occupancy=return_occupancy,
-            density_only=density_only,
             illumination_directions=illumination_directions,
         )
         return field_outputs

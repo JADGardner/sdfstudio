@@ -242,6 +242,9 @@ class NeRFOSR(DataParser):
             intrinsics_files = find_files(f"{split_dir}/intrinsics", exts=["*.txt"])
             pose_files = find_files(f"{split_dir}/pose", exts=["*.txt"])
 
+            # print cwd
+            print(f"Current working directory: {os.getcwd()}")
+
             num_cams = len(pose_files)
 
             intrinsics = []

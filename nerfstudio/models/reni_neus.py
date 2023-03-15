@@ -111,7 +111,7 @@ class RENINeuSModelConfig(NeuSModelConfig):
     """Illumination sampler to use"""
     icosphere_order: int = 2
     """Order of the icosphere to use for illumination sampling"""
-    illumination_sample_directions: int = 100
+    num_illumination_samples: int = 100
     """Number of directions to sample for illumination"""
     albedo_scale: float = 2.0
     """Brightness factor for albedo"""
@@ -156,7 +156,7 @@ class RENINeuSModel(NeuSModel):
         # illumination sampler
         if self.config.illumination_sampler == "icosahedron":
             self.illumination_sampler = IcosahedronSampler(
-                self.config.icosphere_order, apply_random_rotation=True, remove_lower_hemisphere=True
+                self.config.icosphere_order, apply_random_rotation=False, remove_lower_hemisphere=False
             )
 
         # illumination field
@@ -271,7 +271,7 @@ class RENINeuSModel(NeuSModel):
         else:
             illumination_field = self.illumination_field_eval
 
-        illumination_directions = self.illumination_sampler(self.config.illumination_sample_directions)
+        illumination_directions = self.illumination_sampler(self.config.num_illumination_samples)
         illumination_directions = illumination_directions.to(self.device)
 
         field_outputs = self.field(ray_samples, return_alphas=True, illumination_directions=illumination_directions)
@@ -316,119 +316,161 @@ class RENINeuSModel(NeuSModel):
         samples_and_field_outputs["light_directions"] = light_directions
         samples_and_field_outputs["background_colours"] = background_colours
 
-        # background model
-        if self.config.background_model != "none":
-            # sample inversely from far to far_plane_bg and points and forward the bg model
-            ray_bundle.nears = ray_bundle.fars
-            ray_bundle.fars = torch.ones_like(ray_bundle.fars) * self.config.far_plane_bg
+        if self.use_visibility == "sdf" or self.use_visibility == "proposal_network":
+            with torch.no_grad():
+                # only use a subset of rays that hit something
+                mask = accumulation > 0.8  # accumulation [num_rays, 1]
+                mask = mask.squeeze()
 
-            ray_samples_bg = self.sampler_bg(ray_bundle)
-            # use the same background model for both density field and occupancy field
-            field_outputs_bg = self.field_background(ray_samples_bg, True, illumination_directions)
-            weights_bg = ray_samples_bg.get_weights(field_outputs_bg[FieldHeadNames.DENSITY])
+            ray_samples = ray_samples[mask]  # [num_subset_rays, samples_per_ray]
+            ray_bundle = ray_bundle[mask]
+            p2p_dist = p2p_dist[mask]  # [num_subset_rays, 1]
 
-            samples_and_field_outputs["ray_samples_bg"] = ray_samples_bg
-            samples_and_field_outputs["field_outputs_bg"] = field_outputs_bg
-            samples_and_field_outputs["weights_bg"] = weights_bg
-            samples_and_field_outputs["camera_sky_visibility_bg"] = field_outputs["camera_sky_visibility"]
-            samples_and_field_outputs["illumination_visibility_bg"] = field_outputs["illumination_visibility"]
+            if ray_samples.shape[0] == 0:
+                visibility = torch.ones(
+                    (mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])
+                ).type_as(
+                    accumulation
+                )  # [num_rays * samples_per_ray, num_directions]
+                samples_and_field_outputs["sky_visibility_sample"] = visibility
+                return samples_and_field_outputs
 
-            camera_indices = ray_samples_bg.camera_indices.squeeze()  # [num_rays, samples_per_ray]
+            if step is not None:
+                if step < 1500:  # TODO Make configurable
+                    visibility = torch.ones(
+                        (mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])
+                    ).type_as(
+                        accumulation
+                    )  # [num_rays * samples_per_ray, num_directions]
+                    samples_and_field_outputs["sky_visibility_sample"] = visibility
+                    return samples_and_field_outputs
 
-            # Get illumination for samples
-            hdr_light_colours_bg, light_directions_bg = illumination_field(
-                camera_indices, None, illumination_directions, "illumination"
+            # since we are only using a single sample, the sample we think has hit the object,
+            # we can just use one of each of these values, theya are all just copied for each
+            # sample along the ray. So here I'm just taking the first one.
+            origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            directions = ray_samples.frustums.directions[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            pixel_areas = ray_samples.frustums.pixel_area[:, 0:1, :]  # [num_subset_rays, 1, 1]
+            camera_indices = ray_samples.camera_indices[:, 0:1, :]  # [num_subset_rays, 1, 1]
+            nears = ray_bundle.nears  # [num_subset_rays, 1]
+            fars = ray_bundle.fars  # [num_subset_rays, 1]
+            directions_norm = torch.norm(directions, dim=-1, keepdim=True)  # [num_subset_rays, 1, 1]
+
+            # update origin based on p2p distance (expected termination depth)
+            # this is our sample we think has hit the object
+            origins = origins + directions * p2p_dist.unsqueeze(
+                -1
+            )  # TODO How to check this?? Does contraction of space mess this up? Is this from ray origin not camera plane?
+
+            # TODO do we need to shift the origin slightly in the direction of illumination direction out of the NeuS density that anneals over training?
+
+            origins = origins.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 3]
+            directions = (
+                illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 3]
+
+            # move all the origins 0.1 units in the direction of the illumination direction
+            # origins = origins + directions * 0.1  # TODO function of NeuS density?
+
+            pixel_areas = pixel_areas.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 1]
+            camera_indices = camera_indices.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 1]
+            nears = (
+                nears.unsqueeze(1).unsqueeze(2).repeat(1, illumination_directions.shape[0], 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 1]
+            fars = (
+                fars.unsqueeze(1).unsqueeze(2).repeat(1, illumination_directions.shape[0], 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 1]
+
+            directions_norm = directions_norm.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 1]
+
+            visibility_ray_bundle = RayBundle(
+                origins=origins.reshape(-1, 3),
+                directions=directions.reshape(-1, 3),
+                pixel_area=pixel_areas.reshape(-1, 1),
+                directions_norm=directions_norm.reshape(-1, 1),
+                camera_indices=camera_indices.reshape(-1, 1),
+                nears=nears.reshape(-1, 1),
+                fars=fars.reshape(-1, 1),
             )
 
-            samples_and_field_outputs["hdr_light_colours_bg"] = hdr_light_colours_bg
-            samples_and_field_outputs["light_directions_bg"] = light_directions_bg
+            # sdf = self.field.get_sdf_at_pos(origins)
 
-        if self.use_visibility == "sdf" or self.use_visibility == "proposal_network":
-            # TODO Only calculate visibility for points that hit a surface, no point doing it for sky and we've got the sdf so we can get accumulation
+            # plot the histogram of sdf values
+
+            # generate samples from proposal network
             with torch.no_grad():
-                mask = accumulation > 0.8
-
-            normals = normal[mask]
-            ray_samples = ray_samples[mask]
-            ray_bundle = ray_bundle[mask]
-
-            # use normals to remove light directions that wont contribute
-            dot_prod = torch.einsum(
-                "bi,bji->bj", normals, light_directions
-            )  # [num_rays * samples_per_ray, num_reni_directions]
-
-            with torch.no_grad():
-                # create new ray_bundle from current ray_samples positions but in illumination directions
-                origins = (
-                    ray_samples.frustums.get_start_positions()
-                    .unsqueeze(1)
-                    .repeat(1, illumination_directions.shape[0], 1, 1)
-                )  # [num_rays, num_directions, samples_per_ray, 3]
-                camera_indices = ray_samples.camera_indices.unsqueeze(1).repeat(
-                    1, illumination_directions.shape[0], 1, 1
-                )  # [num_rays, num_directions, samples_per_ray, 1]
-                pixel_areas = ray_samples.frustums.pixel_area.unsqueeze(1).repeat(
-                    1, illumination_directions.shape[0], 1, 1
-                )  # [num_rays, num_directions, samples_per_ray, 1]
-                nears = (
-                    ray_bundle.nears.unsqueeze(1)
-                    .unsqueeze(2)
-                    .repeat(1, illumination_directions.shape[0], origins.shape[2], 1)
-                )  # [num_rays, num_directions, samples_per_ray, 1]
-                fars = (
-                    ray_bundle.fars.unsqueeze(1)
-                    .unsqueeze(2)
-                    .repeat(1, illumination_directions.shape[0], origins.shape[2], 1)
-                )  # [num_rays, num_directions, samples_per_ray, 1]
-                directions = (
-                    illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, origins.shape[2], 1)
-                )  # [num_rays, num_directions, samples_per_ray, 3]
-                directions_norm = torch.norm(
-                    directions, dim=-1, keepdim=True
-                )  # [num_rays, num_directions, samples_per_ray, 1]
-                origins = origins.reshape(-1, 3)
-                camera_indices = camera_indices.reshape(-1, 1)
-                pixel_areas = pixel_areas.reshape(-1, 1)
-                nears = nears.reshape(-1, 1)
-                fars = fars.reshape(-1, 1)
-                directions = directions.reshape(-1, 3)
-                directions_norm = directions_norm.reshape(-1, 1)
-                visibility_ray_bundle = RayBundle(
-                    origins=origins,
-                    directions=directions,
-                    pixel_area=pixel_areas,
-                    directions_norm=directions_norm,
-                    camera_indices=camera_indices,
-                    nears=nears,
-                    fars=fars,
-                )
                 ray_samples_vis, weight_list_vis, ray_samples_list_vis = self.proposal_sampler(
                     visibility_ray_bundle, density_fns=self.density_fns
-                )  # ray_samples_vis [num_rays**num_directions*samples_per_ray, samples_per_ray]
+                )  # ray_samples_vis is shape [num_subset_rays*num_directions*1, samples_per_ray] (the 1 is only 1 of the original samples per ray)
                 if self.use_visibility == "sdf":
-                    max_chunk_size = 256
+                    alpha = []
+                    max_chunk_size = 100000000  # for i in ray_sample_chunks:
                     if ray_samples_vis.shape[0] > max_chunk_size:
                         num_chunks = ray_samples_vis.shape[0] // max_chunk_size
+                        remaining_elements = ray_samples_vis.shape[0] % max_chunk_size
 
-                        alpha = []
                         for i in range(num_chunks):
                             ray_sample_chunk = ray_samples_vis[i * max_chunk_size : (i + 1) * max_chunk_size]
                             alpha.append(self.field.get_alpha(ray_sample_chunk))
 
-                    accumulation = []
-                    for i in range(num_chunks):
-                        weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(alpha[i])
-                        accumulation.append(self.renderer_accumulation(weights=weights_vis))
+                        if remaining_elements > 0:
+                            ray_sample_chunk = ray_samples_vis[-remaining_elements:]
+                            alpha.append(self.field.get_alpha(ray_sample_chunk))
+                    else:
+                        alpha = self.field.get_alpha(ray_samples_vis)
 
-                    accumulation = torch.cat(accumulation, dim=0)
-                    samples_and_field_outputs["illumination_visibility"] = 1.0 - accumulation
+                    # if alpha is a tensor
+                    if isinstance(alpha, torch.Tensor):
+                        weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(alpha)
+                        accumulation_subset = self.renderer_accumulation(weights=weights_vis)
+                    else:
+                        accumulation_subset = []
+                        for _, a in enumerate(alpha):
+                            weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(a)
+                            accumulation_subset.append(self.renderer_accumulation(weights=weights_vis))
+
+                        accumulation_subset = torch.cat(
+                            accumulation_subset, dim=0
+                        )  # [num_subset_rays*num_directions*1, 1]
+
+                    accumulation_subset = accumulation_subset.reshape(
+                        ray_samples.shape[0], illumination_directions.shape[0], 1
+                    )  # [num_subset_rays, num_directions, 1]
+
+                    # torch zeros to be no accumulation i.e. presume we can see the sky in all illumination directions
+                    accumulation = torch.zeros((mask.shape[0], illumination_directions.shape[0], 1)).type_as(
+                        accumulation_subset
+                    )  # [num_rays, num_directions, 1]
+
+                    # updated accumulation for the subset of rays that are in the mask (where the ray hit something)
+                    accumulation[mask] = accumulation_subset  # [num_rays, num_directions, 1]
+                    accumulation = accumulation.squeeze(2)  # [num_rays, num_directions]
+                    visibility = 1.0 - accumulation  # [num_rays, num_directions]
+
+                    # reapeat this for all samples along the original ray ray_samples.shape[1] in the limit as all samples along the ray that
+                    # dont contribute to the density become zero this will be valid???
+                    visibility = visibility.unsqueeze(1).repeat(
+                        1, ray_samples.shape[1], 1
+                    )  # [num_rays, samples_per_ray, num_directions]
+                    visibility = visibility.reshape(
+                        -1, visibility.shape[2]
+                    )  # [num_rays*samples_per_ray, num_directions]
+                    samples_and_field_outputs["sky_visibility_sample"] = visibility
                 elif self.use_visibility == "proposal_network":
                     depth = self.renderer_depth(weights=weight_list_vis[1], ray_samples=ray_samples_list_vis[1])
                     near_plane = 0.05
                     far_plane = 3.0
                     depth = (depth - near_plane) / (far_plane - near_plane + 1e-10)
                     depth = torch.clip(depth, 0, 1)
-                    samples_and_field_outputs["illumination_visibility"] = depth
+                    samples_and_field_outputs["sky_visibility_sample"] = depth
 
         return samples_and_field_outputs
 
@@ -441,69 +483,72 @@ class RENINeuSModel(NeuSModel):
 
         # Shortcuts
         field_outputs = samples_and_field_outputs["field_outputs"]
-        ray_samples = samples_and_field_outputs["ray_samples"]
+        # ray_samples = samples_and_field_outputs["ray_samples"]
         weights = samples_and_field_outputs["weights"]
         hdr_light_colours = samples_and_field_outputs["hdr_light_colours"]
         light_directions = samples_and_field_outputs["light_directions"]
         background_colours = samples_and_field_outputs["background_colours"]
-
         albedos = field_outputs[FieldHeadNames.RGB]
         normals = field_outputs[FieldHeadNames.NORMAL]
+        # num_rays = ray_samples.shape[0]
+        # samples_per_ray = ray_samples.shape[1]
+        # num_illumination_directions = light_directions.shape[1]
 
-        camera_sky_visibility = None
+        sky_visibility_camera_ray = None
+        sky_visibility_sample = None
         if self.use_visibility == "mlp":
-            camera_sky_visibility = field_outputs["camera_sky_visibility"]
-            illumination_visibility = field_outputs["illumination_visibility"]
+            sky_visibility_camera_ray = field_outputs["sky_visibility_camera_ray"]
+            sky_visibility_sample = field_outputs[
+                "sky_visibility_sample"
+            ]  # [num_rays*samples_per_ray, num_illumination_directions]
         elif self.use_visibility == "sdf":
-            illumination_visibility = samples_and_field_outputs["illumination_visibility"]
-            illumination_visibility = illumination_visibility.reshape(
-                light_directions.shape[0], light_directions.shape[1]
-            )
+            sky_visibility_sample = samples_and_field_outputs[
+                "sky_visibility_sample"
+            ]  # [num_rays*samples_per_ray, num_directions]
         elif self.use_visibility == "proposal_network":
-            illumination_visibility = samples_and_field_outputs["illumination_visibility"].squeeze(1)
-            illumination_visibility = illumination_visibility.reshape(
-                light_directions.shape[0], light_directions.shape[1]
-            )
+            sky_visibility_sample = samples_and_field_outputs[
+                "sky_visibility_sample"
+            ]  # [num_rays*samples_per_ray, num_directions]
 
         rgb = self.lambertian_renderer(
             albedos=albedos,
             normals=normals,
             light_directions=light_directions,
             light_colors=hdr_light_colours,
-            visibility=illumination_visibility,
+            visibility=sky_visibility_sample,
             background_color=background_colours,
             weights=weights,
         )
 
-        if self.config.background_model != "none":
-            # Shortcuts
-            field_outputs_bg = samples_and_field_outputs["field_outputs_bg"]
-            ray_samples_bg = samples_and_field_outputs["ray_samples_bg"]
-            weights_bg = samples_and_field_outputs["weights_bg"]
-            hdr_light_colours_bg = samples_and_field_outputs["hdr_light_colours_bg"]
-            light_directions_bg = samples_and_field_outputs["light_directions_bg"]
-            camera_sky_visibility_bg = (
-                samples_and_field_outputs["camera_sky_visibility_bg"] if self.use_visibility == "mlp" else None
-            )
-            illumination_visibility_bg = (
-                samples_and_field_outputs["illumination_visibility_bg"] if self.use_visibility == "mlp" else None
-            )
-            bg_transmittance = samples_and_field_outputs["bg_transmittance"]
+        # if self.config.background_model != "none":
+        #     # Shortcuts
+        #     field_outputs_bg = samples_and_field_outputs["field_outputs_bg"]
+        #     ray_samples_bg = samples_and_field_outputs["ray_samples_bg"]
+        #     weights_bg = samples_and_field_outputs["weights_bg"]
+        #     hdr_light_colours_bg = samples_and_field_outputs["hdr_light_colours_bg"]
+        #     light_directions_bg = samples_and_field_outputs["light_directions_bg"]
+        #     camera_sky_visibility_bg = (
+        #         samples_and_field_outputs["camera_sky_visibility_bg"] if self.use_visibility == "mlp" else None
+        #     )
+        #     illumination_visibility_bg = (
+        #         samples_and_field_outputs["illumination_visibility_bg"] if self.use_visibility == "mlp" else None
+        #     )
+        #     bg_transmittance = samples_and_field_outputs["bg_transmittance"]
 
-            albedos_bg = field_outputs_bg[FieldHeadNames.RGB]
-            normals_bg = field_outputs_bg[FieldHeadNames.PRED_NORMALS]
+        #     albedos_bg = field_outputs_bg[FieldHeadNames.RGB]
+        #     normals_bg = field_outputs_bg[FieldHeadNames.PRED_NORMALS]
 
-            rgb_bg = self.lambertian_renderer(
-                albedos=albedos_bg,
-                normals=normals_bg,
-                light_directions=light_directions_bg,
-                light_colors=hdr_light_colours_bg,
-                visibility=illumination_visibility_bg,
-                background_color=background_colours,
-                weights=weights_bg,
-            )
+        # rgb_bg = self.lambertian_renderer(
+        #     albedos=albedos_bg,
+        #     normals=normals_bg,
+        #     light_directions=light_directions_bg,
+        #     light_colors=hdr_light_colours_bg,
+        #     visibility=illumination_visibility_bg,
+        #     background_color=background_colours,
+        #     weights=weights_bg,
+        # )
 
-            rgb = rgb + bg_transmittance * rgb_bg
+        # rgb = rgb + bg_transmittance * rgb_bg
 
         albedo = (
             self.albedo_renderer(
@@ -534,8 +579,8 @@ class RENINeuSModel(NeuSModel):
         }
 
         if self.use_visibility == "mlp":
-            outputs["visibility"] = self.renderer_accumulation(weights=camera_sky_visibility)
-            outputs["illumination_visibility"] = illumination_visibility
+            outputs["visibility"] = self.renderer_accumulation(weights=sky_visibility_camera_ray)
+            outputs["sky_visibility_sample"] = sky_visibility_sample
         elif self.use_visibility == "sdf":
             outputs["visibility"] = 1.0 - samples_and_field_outputs["accumulation"]
         elif self.use_visibility == "proposal_network":
@@ -575,17 +620,17 @@ class RENINeuSModel(NeuSModel):
             if isinstance(v, torch.Tensor) and torch.isnan(v).any():
                 raise ValueError(f"NaNs in output {k}")
 
-        if self.config.background_model != "none":
-            depth_bg = self.renderer_depth(weights=weights_bg, ray_samples=ray_samples_bg)
-            accumulation_bg = self.renderer_accumulation(weights=weights_bg)
+        # if self.config.background_model != "none":
+        #     depth_bg = self.renderer_depth(weights=weights_bg, ray_samples=ray_samples_bg)
+        #     accumulation_bg = self.renderer_accumulation(weights=weights_bg)
 
-            outputs["depth_bg"] = depth_bg
-            outputs["accumulation_bg"] = accumulation_bg
-            outputs["weights_bg"] = weights_bg
-            outputs["rgb_bg"] = rgb_bg
+        #     outputs["depth_bg"] = depth_bg
+        #     outputs["accumulation_bg"] = accumulation_bg
+        #     outputs["weights_bg"] = weights_bg
+        #     outputs["rgb_bg"] = rgb_bg
 
-            if self.use_visibility == "mlp":
-                outputs["visibility_bg"] = self.renderer_accumulation(weights=camera_sky_visibility_bg)
+        #     if self.use_visibility == "mlp":
+        #         outputs["visibility_bg"] = self.renderer_accumulation(weights=camera_sky_visibility_bg)
 
         return outputs
 
@@ -627,17 +672,17 @@ class RENINeuSModel(NeuSModel):
                 loss_dict["visibility_loss"] = (
                     F.binary_cross_entropy_with_logits(
                         outputs["visibility"],
-                        1.0 - fg_label.unsqueeze(1).repeat(1, outputs["visibility"].shape[1], 1),
+                        1.0 - fg_label,
                     )
                     + self.config.visibility_loss_mse_mult
                     * self.eikonal_loss(
                         outputs["visibility"],
-                        torch.ones_like(outputs["illumination_visibility"]).to(self.device),
+                        torch.ones_like(outputs["visibility"]).to(self.device),
                     )
                     + self.config.visibility_loss_mse_mult
                     * self.eikonal_loss(
-                        outputs["illumination_visibility"],
-                        torch.ones_like(outputs["illumination_visibility"]).to(self.device),
+                        outputs["sky_visibility_sample"],
+                        torch.ones_like(outputs["sky_visibility_sample"]).to(self.device),
                     )
                 )
 

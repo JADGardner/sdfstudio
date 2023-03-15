@@ -556,11 +556,11 @@ img = img.permute(1, 2, 0)
 
 # now reshape back but using row-major order
 # %%
-plt.imshow(img.cpu().numpy())
+import matplotlib.pyplot as plt
 import icosphere
 import torch
 from scipy.spatial.transform import Rotation
-
+import plotly.graph_objects as go
 # %%
 from nerfstudio.model_components.illumination_samplers import IcosahedronSampler
 
@@ -605,5 +605,22 @@ from nerfstudio.model_components.illumination_samplers import IcosahedronSampler
 
 sampler = IcosahedronSampler(4, True, True)
 vertices = sampler.generate_direction_samples()
-vertices.shape
+# double size of tensor with more vertgices from sampler
+vertices = torch.cat((vertices, sampler.generate_direction_samples(), sampler.generate_direction_samples()), 0)
+fig = go.Figure(data=[go.Scatter3d(x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2], mode="markers")])
+fig.show()
+# %%
+import torch
+
+# random N, 3 tensor
+t = torch.randn(10, 3)
+
+# random mask tensor of true and false values shape N, 1
+mask = torch.rand(10, 1) > 0.5
+
+# apply mask to tensor
+
+t = t[mask.squeeze(), :]
+# %%
+t.shape
 # %%
