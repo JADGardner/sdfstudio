@@ -187,7 +187,7 @@ class NeRFOSRDataParserConfig(DataParserConfig):
     """Directory specifying location of data."""
     scene: str = "stjacob"
     """which scene to load"""
-    scene_scale: float = 3.0
+    scene_scale: float = 1.0
     """How much to scale the region of interest by."""
     scale_factor: float = 1.0
     """How much to scale the camera origins by."""
