@@ -20,6 +20,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import os
+from pathlib import Path
 import time
 from typing import Dict, List, Tuple
 
@@ -254,6 +255,8 @@ class Trainer:
     def _load_checkpoint(self) -> None:
         """Helper function to load pipeline and optimizer from prespecified checkpoint"""
         load_dir = self.config.trainer.load_dir
+        # load_dir as Path
+        load_dir = Path(load_dir) if load_dir is not None else None
         if load_dir is not None:
             load_step = self.config.trainer.load_step
             if load_step is None:

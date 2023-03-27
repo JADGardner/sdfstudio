@@ -870,12 +870,14 @@ method_configs["RENI-Nerfacto"] = Config(
 method_configs["RENI-NeuS"] = Config(
     method_name="RENI-NeuS",
     trainer=TrainerConfig(
-        steps_per_eval_image=10000,
+        steps_per_eval_image=100,
         steps_per_eval_batch=5000,
         steps_per_save=20000,
         steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
         max_num_iterations=100001,
         mixed_precision=False,
+        load_dir="/workspaces/sdfstudio/outputs/data-NeRF-OSR-Data/RENI-NeuS/2023-03-23_093506/sdfstudio_models",
+        load_step=40000,
     ),
     pipeline=FitEvalLatentsPipelineConfig(
         datamanager=VanillaDataManagerConfig(
@@ -899,7 +901,7 @@ method_configs["RENI-NeuS"] = Config(
                 beta_init=0.3,
                 use_appearance_embedding=False,
                 inside_outside=False,  # False is for outdoor scenes
-                use_visibility="none",
+                use_visibility="sphere_tracing",
             ),
             eval_num_rays_per_chunk=256,
             fg_mask_loss_mult=1.0,
@@ -911,7 +913,9 @@ method_configs["RENI-NeuS"] = Config(
             visibility_loss_mse_mult=1.0,
             background_model="none",
             use_average_appearance_embedding=False,
-            icosphere_order=1,
+            icosphere_order=3,
+            illumination_sampler_random_rotation=True,
+            illumination_sample_remove_lower_hemisphere=True,
         ),
         eval_latent_optimisation_source="image_half_inverse",
         eval_latent_optimisation_epochs=50,

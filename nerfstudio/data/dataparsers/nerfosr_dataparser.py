@@ -52,16 +52,22 @@ def get_masks(image_idx: int, masks, fg_masks, semantic_masks):
     """
 
     # mask
-    mask = masks[image_idx]
-    mask = BasicImages([mask])
+    mask = None
+    if masks is not None:
+        mask = masks[image_idx]
+        mask = BasicImages([mask])
 
     # foreground mask
-    fg_mask = fg_masks[image_idx]
-    fg_mask = BasicImages([fg_mask])
+    fg_mask = None
+    if fg_masks is not None:
+        fg_mask = fg_masks[image_idx]
+        fg_mask = BasicImages([fg_mask])
 
     # semantic mask
-    semantic_mask = semantic_masks[image_idx]
-    semantic_mask = BasicImages([semantic_mask])
+    semantic_mask = None
+    if semantic_masks is not None:
+        semantic_mask = semantic_masks[image_idx]
+        semantic_mask = BasicImages([semantic_mask])
 
     return {"mask": mask, "fg_mask": fg_mask, "semantic_mask": semantic_mask}
 
@@ -226,7 +232,10 @@ class NeRFOSR(DataParser):
         super().__init__(config=config)
         self.data: Path = config.data
         self.scene: str = config.scene
-        self.scene_dir = f"{self.data}/{self.scene}/final"
+        if self.scene == "trevi":
+            self.scene_dir = f"{self.data}/{self.scene}/final_clean"
+        else:
+            self.scene_dir = f"{self.data}/{self.scene}/final"
 
     def _generate_dataparser_outputs(self, split="train"):
         def parse_txt(filename):
@@ -241,9 +250,6 @@ class NeRFOSR(DataParser):
             # camera parameters files
             intrinsics_files = find_files(f"{split_dir}/intrinsics", exts=["*.txt"])
             pose_files = find_files(f"{split_dir}/pose", exts=["*.txt"])
-
-            # print cwd
-            print(f"Current working directory: {os.getcwd()}")
 
             num_cams = len(pose_files)
 
@@ -347,7 +353,11 @@ class NeRFOSR(DataParser):
         )
 
         split = "validation" if split == "val" else split
-        split_dir = f"{self.data}/{self.scene}/final/{split}"
+
+        if self.scene == "trevi":
+            split_dir = f"{self.data}/{self.scene}/final_clean/{split}"
+        else:
+            split_dir = f"{self.data}/{self.scene}/final/{split}"
 
         # --- images ---
         image_filenames = find_files(f"{split_dir}/rgb", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"])
@@ -448,7 +458,7 @@ class NeRFOSR(DataParser):
                 semantic_masks.append(segmentation_image)
         else:
             # --- masks ---
-            if self.config.use_masks is not None:
+            if self.config.use_masks:
                 mask_filenames = find_files(f"{split_dir}/mask", exts=["*.png", "*.jpg", "*.JPG", "*.PNG"])
 
         additional_inputs = {
