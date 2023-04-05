@@ -519,11 +519,16 @@ class RENIField(IlluminationField):
         chkpt_path,
         num_latent_codes,
         fixed_decoder=True,
+        train_scale=False,
     ):
-
         super().__init__()
 
         self.reni = get_reni_field(chkpt_path, num_latent_codes, fixed_decoder)
+
+        self.train_scale = train_scale
+
+        if self.train_scale:
+            self.scale = nn.Parameter(torch.ones(num_latent_codes))
 
     def reset_latents(self):
         self.reni.get_Z().data = torch.zeros_like(self.reni.get_Z().data)
@@ -554,6 +559,9 @@ class RENIField(IlluminationField):
             light_directions = directions.unsqueeze(0).repeat(Z.shape[0], 1, 1).to(Z.device)  # [unique_indices, D, 3]
             light_colours = self.reni(Z, light_directions)  # [unique_indices, D, 3]
             light_colours = self.reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
+            if self.train_scale:
+                scale = self.scale[unique_indices].view(-1, 1, 1)  # [unique_indices, 1, 1]
+                light_colours = light_colours * scale
             light_colours = light_colours[inverse_indices]  # [num_rays, samples_per_ray, D, 3]
             light_colours = light_colours.reshape(-1, directions.shape[0], 3)  # [num_rays * samples_per_ray, D, 3]
             # convert directions back to nerfstudio coordinate system
@@ -576,11 +584,17 @@ class RENIField(IlluminationField):
             light_colours = self.reni(Z, light_directions)  # [num_rays, 1, 3]
             light_colours = light_colours.squeeze(1)  # [num_rays, 3]
             light_colours = self.reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
+            if self.train_scale:
+                scale = self.scale[inverse_indices[:, 0]].view(-1, 1)  # [unique_indices, 1]
+                light_colours = light_colours * scale
             light_colours = sRGB(light_colours)  # [num_rays, 1, 3]
             return light_colours, light_directions
         elif illumination_type == "envmap":
             Z, _, _ = self.reni.sample_latent(unique_indices)
             light_colours = self.reni(Z, directions)  # [unique_indices, D, 3]
             light_colours = self.reni.unnormalise(light_colours)  # undo reni scaling between -1 and 1
+            if self.train_scale:
+                scale = self.scale[unique_indices].view(-1, 1, 1)  # [unique_indices, 1, 1]
+                light_colours = light_colours * scale
             light_colours = sRGB(light_colours)  # [unique_indices, D, 3]
             return light_colours, None

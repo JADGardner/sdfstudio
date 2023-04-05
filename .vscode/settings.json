@@ -130,5 +130,6 @@
     "reportOptionalCall": "none"
   },
   "python.languageServer": "Pylance",
-  "python.defaultInterpreterPath": "/home/yuzh/anaconda3/envs/monosdf/bin/python"
+  "python.defaultInterpreterPath": "/mnt/scratch/users/jadg502/code/sdfstudio/.devcontainer/singularity_python.sh",
+  "python.testing.pytestPath": "/mnt/scratch/users/jadg502/code/sdfstudio/.devcontainer/singularity_python.sh"
 }

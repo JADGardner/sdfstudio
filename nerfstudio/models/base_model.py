@@ -34,6 +34,10 @@ from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.model_components.scene_colliders import NearFarCollider
 
+from rich.progress import BarColumn, Console, Progress, TextColumn, TimeRemainingColumn
+
+CONSOLE = Console(width=120)
+
 
 # Model related configs
 @dataclass
@@ -163,7 +167,9 @@ class Model(nn.Module):
         """
 
     @torch.no_grad()
-    def get_outputs_for_camera_ray_bundle(self, camera_ray_bundle: RayBundle) -> Dict[str, torch.Tensor]:
+    def get_outputs_for_camera_ray_bundle(
+        self, camera_ray_bundle: RayBundle, show_progress=False
+    ) -> Dict[str, torch.Tensor]:
         """Takes in camera parameters and computes the output of the model.
 
         Args:
@@ -173,14 +179,43 @@ class Model(nn.Module):
         image_height, image_width = camera_ray_bundle.origins.shape[:2]
         num_rays = len(camera_ray_bundle)
         outputs_lists = defaultdict(list)
-        for i in range(0, num_rays, num_rays_per_chunk):
-            start_idx = i
-            end_idx = i + num_rays_per_chunk
-            ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
-            outputs = self.forward(ray_bundle=ray_bundle)
-            for output_name, output in outputs.items():  # type: ignore
-                outputs_lists[output_name].append(output)
+
+        if show_progress:
+            with Progress(
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeRemainingColumn(),
+            ) as progress:
+                task = progress.add_task("[green]Generating output for camera...", total=num_rays, extra="")
+                for i in range(0, num_rays, num_rays_per_chunk):
+                    start_idx = i
+                    end_idx = i + num_rays_per_chunk
+                    ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
+                    outputs = self.forward(ray_bundle=ray_bundle)
+                    torch.cuda.empty_cache()
+                    for output_name, output in outputs.items():  # type: ignore
+                        outputs_lists[output_name].append(output)
+                    progress.update(task, completed=i)
+        else:
+            for i in range(0, num_rays, num_rays_per_chunk):
+                start_idx = i
+                end_idx = i + num_rays_per_chunk
+                ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
+                outputs = self.forward(ray_bundle=ray_bundle)
+                torch.cuda.empty_cache()
+                for output_name, output in outputs.items():  # type: ignore
+                    outputs_lists[output_name].append(output)
+
         outputs = {}
+        # for i in range(0, num_rays, num_rays_per_chunk):
+        #     start_idx = i
+        #     end_idx = i + num_rays_per_chunk
+        #     ray_bundle = camera_ray_bundle.get_row_major_sliced_ray_bundle(start_idx, end_idx)
+        #     outputs = self.forward(ray_bundle=ray_bundle)
+        #     for output_name, output in outputs.items():  # type: ignore
+        #         outputs_lists[output_name].append(output)
+        # outputs = {}
         for output_name, outputs_list in outputs_lists.items():
             if not torch.is_tensor(outputs_list[0]):
                 # TODO: handle lists of tensors as well

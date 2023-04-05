@@ -176,6 +176,14 @@ class RGBLambertianRendererWithVisibility(nn.Module):
 
                 dot_prod = torch.clamp(dot_prod, 0, 1)
 
+                # count the number of elements in dot product that are greater than 0
+                count = torch.sum((dot_prod > 0).float(), dim=1, keepdim=True)
+
+                # replace all 0 values with 1 to avoid division by 0
+                count = torch.where(count > 0, count, torch.ones_like(count))
+
+                dot_prod = dot_prod / count
+
                 if visibility is not None:
                     visibility_chunk = visibility[i * max_chunk_size : (i + 1) * max_chunk_size]
                     dot_prod = dot_prod * visibility_chunk
@@ -196,6 +204,14 @@ class RGBLambertianRendererWithVisibility(nn.Module):
 
             # clamp dot product values to be between 0 and 1
             dot_prod = torch.clamp(dot_prod, 0, 1)
+
+            # count the number of elements in dot product that are greater than 0
+            count = torch.sum((dot_prod > 0).float(), dim=1, keepdim=True)
+
+            # replace all 0 values with 1 to avoid division by 0
+            count = torch.where(count > 0, count, torch.ones_like(count))
+
+            dot_prod = dot_prod / count
 
             if visibility is not None:
                 # Apply the visibility mask to the dot product

@@ -28,9 +28,17 @@ Stage: spython-base
   pip install icosphere
   pip install trimesh
   pip install ipykernel
+  pip install jupyterlab
+  pip install ipywidgets
+  pip install torch-tb-profiler
+  pip install pytest
+  pip install pip-system-certs
+  pip install wandb --upgrade
 
   su - 
 
   chmod -R 777 /home/user/
 
   su - user
+
+  

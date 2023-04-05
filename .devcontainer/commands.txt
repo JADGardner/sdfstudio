@@ -1,0 +1,8 @@
+singularity shell --nv --no-home -B /mnt/scratch/users/jadg502:/users/$USER/scratch -B /mnt/scratch/users/jadg502/.config:/users/$USER/.config --env MPLCONFIGDIR=/users/$USER/scratch/.config/matplotlib .devcontainer/sdfstudio.sif
+
+ns-train RENI-NeuS nerfosr-data --scene lk2 --use-session-data False
+
+singularity shell --nv --no-home -B /mnt/scratch/users/$USER:/users/$USER/scratch -B /users/$USER/.config:/users/$USER/.config -B /users/$USER/.local:/users/$USER/.local -B /users/$USER/.vscode-server:/users/$USER/.vscode-server --env MPLCONFIGDIR=/users/$USER/.config/matplotlib /mnt/scratch/users/$USER/code/sdfstudio/.devcontainer/sdfstudio_new.sif
+
+singularity exec --nv --no-home -B /mnt/scratch/users/$USER:/users/$USER/scratch -B /users/$USER/.config:/users/$USER/.config -B /users/$USER/.local:/users/$USER/.local -B /users/$USER/.vscode-server:/users/$USER/.vscode-server --env MPLCONFIGDIR=/users/$USER/.config/matplotlib /mnt/scratch/users/$USER/code/sdfstudio/.devcontainer/sdfstudio.sif python3 -m ipykernel_launcher
+

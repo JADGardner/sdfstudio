@@ -101,6 +101,8 @@ class RENINeuSModelConfig(NeuSModelConfig):
     """Weight for the reni cosine loss"""
     reni_loss_mult: float = 1.0
     """Weight for the reni loss"""
+    train_reni_scale: bool = False
+    """Whether to train the reni scale"""
     orientation_loss_mult: float = 0.0001
     """Orientation loss multipier on computed noramls."""
     visibility_loss_mse_mult: float = 0.01
@@ -167,8 +169,12 @@ class RENINeuSModel(NeuSModel):
 
         # illumination field
         if self.config.illumination_field == "reni":
-            self.illumination_field_train = RENIField(self.config.reni_path, num_latent_codes=self.num_train_data)
-            self.illumination_field_eval = RENIField(self.config.reni_path, num_latent_codes=self.num_eval_data)
+            self.illumination_field_train = RENIField(
+                self.config.reni_path, num_latent_codes=self.num_train_data, train_scale=self.config.train_reni_scale
+            )
+            self.illumination_field_eval = RENIField(
+                self.config.reni_path, num_latent_codes=self.num_eval_data, train_scale=self.config.train_reni_scale
+            )
 
         if self.config.background_model == "grid":
             # overwrite background model with albdeo field
@@ -348,7 +354,7 @@ class RENINeuSModel(NeuSModel):
                 samples_and_field_outputs["sky_visibility_sample"] = visibility
                 return samples_and_field_outputs
 
-        if self.use_visibility == "sdf" or self.use_visibility == "sphere_tracing":
+        if self.use_visibility in ("sdf", "sphere_tracing"):
             # since we are only using a single sample, the sample we think has hit the object,
             # we can just use one of each of these values, theya are all just copied for each
             # sample along the ray. So here I'm just taking the first one.
@@ -363,40 +369,23 @@ class RENINeuSModel(NeuSModel):
             # update origin based on p2p distance (expected termination depth)
             # this is our sample we think has hit the object
             if self.use_visibility == "sdf":
-                origins = origins + ray_directions * p2p_dist.unsqueeze(
-                    -1
-                )  # TODO How to check this?? Does contraction of space mess this up? Is this from ray origin not camera plane?
+                origins += ray_directions * p2p_dist.unsqueeze(-1)
             elif self.use_visibility == "sphere_tracing":
-                origins = origins + ray_directions * p2p_dist.unsqueeze(-1)
+                origins += ray_directions * p2p_dist.unsqueeze(-1)
 
             # TODO do we need to shift the origin slightly in the direction of illumination direction out of the NeuS density that anneals over training?
 
-            origins = origins.unsqueeze(1).repeat(
-                1, illumination_directions.shape[0], 1, 1
-            )  # [num_subset_rays, num_directions, 1, 3]
-            directions = (
-                illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
-            )  # [num_subset_rays, num_directions, 1, 3]
+            num_subset_rays = origins.shape[0]
+            num_directions = illumination_directions.shape[0]
 
-            # move all the origins 0.1 units in the direction of the illumination direction
-            # origins = origins + directions * 0.1  # TODO function of NeuS density?
+            origins = origins.repeat_interleave(num_directions, dim=1)
+            directions = illumination_directions.unsqueeze(0).unsqueeze(2).repeat(num_subset_rays, 1, 1, 1)
 
-            pixel_areas = pixel_areas.unsqueeze(1).repeat(
-                1, illumination_directions.shape[0], 1, 1
-            )  # [num_subset_rays, num_directions, 1, 1]
-            camera_indices = camera_indices.unsqueeze(1).repeat(
-                1, illumination_directions.shape[0], 1, 1
-            )  # [num_subset_rays, num_directions, 1, 1]
-            nears = (
-                nears.unsqueeze(1).unsqueeze(2).repeat(1, illumination_directions.shape[0], 1, 1)
-            )  # [num_subset_rays, num_directions, 1, 1]
-            fars = (
-                fars.unsqueeze(1).unsqueeze(2).repeat(1, illumination_directions.shape[0], 1, 1)
-            )  # [num_subset_rays, num_directions, 1, 1]
-
-            directions_norm = directions_norm.unsqueeze(1).repeat(
-                1, illumination_directions.shape[0], 1, 1
-            )  # [num_subset_rays, num_directions, 1, 1]
+            pixel_areas = pixel_areas.repeat_interleave(num_directions, dim=1)
+            camera_indices = camera_indices.repeat_interleave(num_directions, dim=1)
+            nears = nears.unsqueeze(1).unsqueeze(2).repeat_interleave(num_directions, dim=1)
+            fars = fars.unsqueeze(1).unsqueeze(2).repeat_interleave(num_directions, dim=1)
+            directions_norm = directions_norm.repeat_interleave(num_directions, dim=1)
 
             visibility_ray_bundle = RayBundle(
                 origins=origins.reshape(-1, 3),
@@ -407,116 +396,111 @@ class RENINeuSModel(NeuSModel):
                 nears=nears.reshape(-1, 1),
                 fars=fars.reshape(-1, 1),
             )
-
             # generate samples from proposal network
-            with torch.no_grad():
-                if self.use_visibility == "sdf":
-                    ray_samples_vis, _, _ = self.proposal_sampler(
-                        visibility_ray_bundle, density_fns=self.density_fns
-                    )  # ray_samples_vis is shape [num_subset_rays*num_directions*1, samples_per_ray] (the 1 is only 1 of the original samples per ray)
-                    alpha = []
-                    max_chunk_size = 100000000  # for i in ray_sample_chunks:
-                    if ray_samples_vis.shape[0] > max_chunk_size:
-                        num_chunks = ray_samples_vis.shape[0] // max_chunk_size
-                        remaining_elements = ray_samples_vis.shape[0] % max_chunk_size
 
-                        for i in range(num_chunks):
-                            ray_sample_chunk = ray_samples_vis[i * max_chunk_size : (i + 1) * max_chunk_size]
-                            alpha.append(self.field.get_alpha(ray_sample_chunk))
+            if self.use_visibility == "sdf":
+                ray_samples_vis, _, _ = self.proposal_sampler(
+                    visibility_ray_bundle, density_fns=self.density_fns
+                )  # ray_samples_vis is shape [num_subset_rays*num_directions*1, samples_per_ray] (the 1 is only 1 of the original samples per ray)
+                alpha = []
+                max_chunk_size = 100000  # for i in ray_sample_chunks:
+                if ray_samples_vis.shape[0] > max_chunk_size:
+                    num_chunks = ray_samples_vis.shape[0] // max_chunk_size
+                    remaining_elements = ray_samples_vis.shape[0] % max_chunk_size
 
-                        if remaining_elements > 0:
-                            ray_sample_chunk = ray_samples_vis[-remaining_elements:]
-                            alpha.append(self.field.get_alpha(ray_sample_chunk))
-                    else:
-                        alpha = self.field.get_alpha(ray_samples_vis)
+                    for i in range(num_chunks):
+                        ray_sample_chunk = ray_samples_vis[i * max_chunk_size : (i + 1) * max_chunk_size]
+                        alpha.append(self.field.get_alpha(ray_sample_chunk))
 
-                    # if alpha is a tensor
-                    if isinstance(alpha, torch.Tensor):
-                        weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(alpha)
-                        accumulation_subset = self.renderer_accumulation(weights=weights_vis)
-                    else:
-                        accumulation_subset = []
-                        for _, a in enumerate(alpha):
-                            weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(a)
-                            accumulation_subset.append(self.renderer_accumulation(weights=weights_vis))
+                    if remaining_elements > 0:
+                        ray_sample_chunk = ray_samples_vis[-remaining_elements:]
+                        alpha.append(self.field.get_alpha(ray_sample_chunk))
+                else:
+                    alpha = self.field.get_alpha(ray_samples_vis)
 
-                        accumulation_subset = torch.cat(
-                            accumulation_subset, dim=0
-                        )  # [num_subset_rays*num_directions*1, 1]
+                # if alpha is a tensor
+                if isinstance(alpha, torch.Tensor):
+                    weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(alpha)
+                    accumulation_subset = self.renderer_accumulation(weights=weights_vis)
+                else:
+                    accumulation_subset = []
+                    for _, a in enumerate(alpha):
+                        weights_vis, transmittance = ray_samples.get_weights_and_transmittance_from_alphas(a)
+                        accumulation_subset.append(self.renderer_accumulation(weights=weights_vis))
 
-                    accumulation_subset = accumulation_subset.reshape(
-                        ray_samples.shape[0], illumination_directions.shape[0], 1
-                    )  # [num_subset_rays, num_directions, 1]
+                    accumulation_subset = torch.cat(accumulation_subset, dim=0)  # [num_subset_rays*num_directions*1, 1]
 
-                    # torch zeros to be no accumulation i.e. presume we can see the sky in all illumination directions
-                    accumulation = torch.zeros((mask.shape[0], illumination_directions.shape[0], 1)).type_as(
-                        accumulation_subset
-                    )  # [num_rays, num_directions, 1]
+                accumulation_subset = accumulation_subset.reshape(
+                    ray_samples.shape[0], illumination_directions.shape[0], 1
+                )  # [num_subset_rays, num_directions, 1]
 
-                    # updated accumulation for the subset of rays that are in the mask (where the ray hit something)
-                    accumulation[mask] = accumulation_subset  # [num_rays, num_directions, 1]
-                    accumulation = accumulation.squeeze(2)  # [num_rays, num_directions]
-                    visibility = 1.0 - accumulation  # [num_rays, num_directions]
+                # torch zeros to be no accumulation i.e. presume we can see the sky in all illumination directions
+                accumulation = torch.zeros((mask.shape[0], illumination_directions.shape[0], 1)).type_as(
+                    accumulation_subset
+                )  # [num_rays, num_directions, 1]
 
-                    # reapeat this for all samples along the original ray ray_samples.shape[1] in the limit as all samples along the ray that
-                    # dont contribute to the density become zero this will be valid???
-                    visibility = visibility.unsqueeze(1).repeat(
-                        1, ray_samples.shape[1], 1
-                    )  # [num_rays, samples_per_ray, num_directions]
-                    visibility = visibility.reshape(
-                        -1, visibility.shape[2]
-                    )  # [num_rays*samples_per_ray, num_directions]
-                    samples_and_field_outputs["sky_visibility_sample"] = visibility
-                elif self.use_visibility == "sphere_tracing":
-                    # Define sphere tracing parameters
-                    max_iter = 50
-                    epsilon = 0.001
+                # updated accumulation for the subset of rays that are in the mask (where the ray hit something)
+                accumulation[mask] = accumulation_subset  # [num_rays, num_directions, 1]
+                accumulation = accumulation.squeeze(2)  # [num_rays, num_directions]
+                visibility = 1.0 - accumulation  # [num_rays, num_directions]
 
-                    # origins is shape [num_subset_rays, num_directions, 1, 3]
-                    # directions is shape [num_subset_rays, num_directions, 1, 3]
+                # reapeat this for all samples along the original ray ray_samples.shape[1] in the limit as all samples along the ray that
+                # dont contribute to the density become zero this will be valid???
+                visibility = visibility.unsqueeze(1).repeat(
+                    1, ray_samples.shape[1], 1
+                )  # [num_rays, samples_per_ray, num_directions]
+                visibility = visibility.reshape(-1, visibility.shape[2])  # [num_rays*samples_per_ray, num_directions]
+                samples_and_field_outputs["sky_visibility_sample"] = visibility
+            elif self.use_visibility == "sphere_tracing":
+                # Define sphere tracing parameters
+                max_iter = 50
+                epsilon = 0.001
 
-                    # Initialize hit and distance tensors
-                    distance = torch.zeros(origins.shape[0], origins.shape[1], 1, 1).type_as(origins)
+                # origins is shape [num_subset_rays, num_directions, 1, 3]
+                # directions is shape [num_subset_rays, num_directions, 1, 3]
 
-                    ray_directions = ray_directions.unsqueeze(1).repeat(
-                        1, illumination_directions.shape[0], 1, 1
-                    )  # [num_subset_rays, num_directions, 1, 3]
+                # Initialize hit and distance tensors
+                distance = torch.zeros(origins.shape[0], origins.shape[1], 1, 1).type_as(origins)
 
-                    # firstly we may have overshot the surface so we need to move the ray back to the surface
-                    sdf = self.field.get_sdf_at_pos(origins)
+                ray_directions = ray_directions.unsqueeze(1).repeat(
+                    1, illumination_directions.shape[0], 1, 1
+                )  # [num_subset_rays, num_directions, 1, 3]
+
+                # firstly we may have overshot the surface so we need to move the ray back to the surface
+                sdf = self.field.get_sdf_at_pos(origins)
+                sdf = sdf.reshape(origins.shape[0], origins.shape[1], 1, 1)
+                sdf = torch.clamp(sdf, max=0.0) * 4.0
+
+                print("sdf", sdf.shape, "origins", origins.shape, "ray_directions", ray_directions.shape)
+                origins = origins + sdf * ray_directions
+
+                # Sphere tracing loop
+                for _ in range(max_iter):
+                    # Evaluate SDF at current position
+                    sdf = self.field.get_sdf_at_pos(origins + distance * directions)
+
                     sdf = sdf.reshape(origins.shape[0], origins.shape[1], 1, 1)
-                    sdf = torch.clamp(sdf, max=0.0) * 4.0
-                    origins = origins + sdf * ray_directions
 
-                    # Sphere tracing loop
-                    for _ in range(max_iter):
-                        # Evaluate SDF at current position
-                        sdf = self.field.get_sdf_at_pos(origins + distance * directions)
+                    # Update distance
+                    distance += sdf
 
-                        sdf = sdf.reshape(origins.shape[0], origins.shape[1], 1, 1)
+                    # Check for hit
+                    hit = sdf < epsilon
 
-                        # Update distance
-                        distance += sdf
+                # Compute visibility
+                hit = (hit > 0).float()
 
-                        # Check for hit
-                        hit = sdf < epsilon
+                accumulation = torch.zeros((mask.shape[0], illumination_directions.shape[0], 1, 1)).type_as(origins)
+                accumulation[mask] = hit
 
-                    # Compute visibility
-                    hit = (hit > 0).float()
+                visibility = 1.0 - (accumulation.squeeze() + 1e-4)
 
-                    accumulation = torch.zeros((mask.shape[0], illumination_directions.shape[0], 1, 1)).type_as(origins)
-                    accumulation[mask] = hit
-
-                    visibility = 1.0 - (accumulation.squeeze() + 1e-4)
-
-                    # Reshape visibility
-                    visibility = visibility.unsqueeze(1).repeat(
-                        1, ray_samples.shape[1], 1
-                    )  # [num_rays, samples_per_ray, num_directions]
-                    visibility = visibility.reshape(
-                        -1, visibility.shape[2]
-                    )  # [num_rays*samples_per_ray, num_directions]
-                    samples_and_field_outputs["sky_visibility_sample"] = visibility
+                # Reshape visibility
+                visibility = visibility.unsqueeze(1).repeat(
+                    1, ray_samples.shape[1], 1
+                )  # [num_rays, samples_per_ray, num_directions]
+                visibility = visibility.reshape(-1, visibility.shape[2])  # [num_rays*samples_per_ray, num_directions]
+                samples_and_field_outputs["sky_visibility_sample"] = visibility
         else:
             visibility = torch.ones((mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])).type_as(
                 accumulation
@@ -813,7 +797,6 @@ class RENINeuSModel(NeuSModel):
             for _ in range(epochs):
                 epoch_loss = 0.0
                 for step in range(len(datamanager.eval_dataset)):
-
                     # Lots of admin to get the data in the right format depending on task
                     if gt_source in ["envmap"]:
                         ray_bundle, batch = datamanager.next_eval(step)

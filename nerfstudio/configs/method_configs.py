@@ -25,6 +25,7 @@ import tyro
 from nerfstudio.cameras.camera_optimizers import CameraOptimizerConfig
 from nerfstudio.configs.base_config import (
     Config,
+    MachineConfig,
     SchedulerConfig,
     TrainerConfig,
     ViewerConfig,
@@ -869,15 +870,18 @@ method_configs["RENI-Nerfacto"] = Config(
 
 method_configs["RENI-NeuS"] = Config(
     method_name="RENI-NeuS",
+    machine=MachineConfig(
+        num_gpus=1,
+    ),
     trainer=TrainerConfig(
-        steps_per_eval_image=100,
-        steps_per_eval_batch=5000,
+        steps_per_eval_image=10000,
+        steps_per_eval_batch=100000,
         steps_per_save=20000,
         steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
-        max_num_iterations=100001,
+        max_num_iterations=120001,
         mixed_precision=False,
-        load_dir="/workspaces/sdfstudio/outputs/data-NeRF-OSR-Data/RENI-NeuS/2023-03-23_093506/sdfstudio_models",
-        load_step=40000,
+        load_dir="outputs/data-NeRF-OSR-Data/RENI-NeuS/latest_with_rot_and_clip_illumination/sdfstudio_models",
+        load_step=100000,
     ),
     pipeline=FitEvalLatentsPipelineConfig(
         datamanager=VanillaDataManagerConfig(
@@ -901,19 +905,21 @@ method_configs["RENI-NeuS"] = Config(
                 beta_init=0.3,
                 use_appearance_embedding=False,
                 inside_outside=False,  # False is for outdoor scenes
-                use_visibility="sphere_tracing",
+                use_visibility="sdf",
             ),
             eval_num_rays_per_chunk=256,
             fg_mask_loss_mult=1.0,
             reni_loss_mult=1.0,
             reni_path="checkpoints/reni_pretrained_weights/latent_dim_36_net_5_256_vad_cbc_tanh_hdr/version_0/checkpoints/fit_decoder_epoch=1579.ckpt",
+            train_reni_scale=True,
             near_plane=0.05,
-            far_plane=100.0,
+            far_plane=4.0,
+            albedo_scale=1.0,
             far_plane_bg=1000.0,
             visibility_loss_mse_mult=1.0,
             background_model="none",
             use_average_appearance_embedding=False,
-            icosphere_order=3,
+            icosphere_order=11,
             illumination_sampler_random_rotation=True,
             illumination_sample_remove_lower_hemisphere=True,
         ),
