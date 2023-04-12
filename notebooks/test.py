@@ -2,7 +2,7 @@
 
 import os
 
-# os.chdir("/workspaces/sdfstudio/")
+os.chdir("/users/jadg502/scratch/code/sdfstudio/")
 
 import torch
 import yaml
@@ -88,8 +88,8 @@ def rotation_matrix(axis, angle):
 # setup config
 test_mode = "val"
 world_size = 1
-local_rank = 0
-device = "cuda:0"
+local_rank = 1
+device = "cuda:1"
 
 ckpt_path = "outputs/data-NeRF-OSR-Data/RENI-NeuS/latest_with_rot_and_clip_illumination/"
 step = 100000

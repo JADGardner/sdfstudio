@@ -220,6 +220,32 @@ class RENINeuSModel(NeuSModel):
             update_sched=update_schedule,
         )
 
+        if self.use_visibility == "mlp":
+            self.mlp_visibility = tcnn.Network(
+                n_input_dims=3
+                + self.position_encoding.get_out_dim()
+                + self.encoding.n_output_dims
+                + self.direction_encoding.get_out_dim()
+                + self.config.geo_feat_dim,
+                n_output_dims=output_dim_visibility,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": hidden_dim_visibility,
+                    "n_hidden_layers": num_layers_visibility - 1,
+                },
+            )
+            self.field_head_visibility = DensityFieldHead(
+                in_dim=self.mlp_visibility.n_output_dims, activation=torch.sigmoid
+            )
+            self.field_head_termination = FieldHead(
+                field_head_name=FieldHeadNames.TERMINATION,
+                in_dim=self.mlp_visibility.n_output_dims,
+                out_dim=1,
+                activation=torch.sigmoid,
+            )
+
         self.albedo_renderer = RGBRenderer(background_color=torch.tensor([1.0, 1.0, 1.0]))
         self.lambertian_renderer = RGBLambertianRendererWithVisibility()
 
@@ -328,33 +354,35 @@ class RENINeuSModel(NeuSModel):
         samples_and_field_outputs["light_directions"] = light_directions
         samples_and_field_outputs["background_colours"] = background_colours
 
-        with torch.no_grad():
-            # only use a subset of rays that hit something
-            mask = accumulation > 0.8  # accumulation [num_rays, 1]
-            mask = mask.squeeze()
-
-        ray_samples = ray_samples[mask]  # [num_subset_rays, samples_per_ray]
-        ray_bundle = ray_bundle[mask]
-        p2p_dist = p2p_dist[mask]  # [num_subset_rays, 1]
-
-        if ray_samples.shape[0] == 0:
-            visibility = torch.ones((mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])).type_as(
-                accumulation
-            )  # [num_rays * samples_per_ray, num_directions]
-            samples_and_field_outputs["sky_visibility_sample"] = visibility
-            return samples_and_field_outputs
-
-        if step is not None:
-            if step < 20000:  # TODO Make configurable
-                visibility = torch.ones(
-                    (mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])
-                ).type_as(
-                    accumulation
-                )  # [num_rays * samples_per_ray, num_directions]
-                samples_and_field_outputs["sky_visibility_sample"] = visibility
-                return samples_and_field_outputs
+        # if step is not None:
+        #     if step < 20000:  # TODO Make configurable
+        #         visibility = torch.ones(
+        #             (mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])
+        #         ).type_as(
+        #             accumulation
+        #         )  # [num_rays * samples_per_ray, num_directions]
+        #         samples_and_field_outputs["sky_visibility_sample"] = visibility
+        #         return samples_and_field_outputs
 
         if self.use_visibility in ("sdf", "sphere_tracing"):
+            with torch.no_grad():
+                # only use a subset of rays that hit something
+                mask = accumulation > 0.8  # accumulation [num_rays, 1] # TODO Make configurable
+                mask = mask.squeeze()
+
+            # ray_samples = ray_samples[mask]  # [num_subset_rays, samples_per_ray]
+            # ray_bundle = ray_bundle[mask]
+            # p2p_dist = p2p_dist[mask]  # [num_subset_rays, 1]
+
+            # if ray_samples.shape[0] == 0:
+            #     visibility = torch.ones(
+            #         (mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])
+            #     ).type_as(
+            #         accumulation
+            #     )  # [num_rays * samples_per_ray, num_directions]
+            #     samples_and_field_outputs["sky_visibility_sample"] = visibility
+            #     return samples_and_field_outputs
+
             # since we are only using a single sample, the sample we think has hit the object,
             # we can just use one of each of these values, theya are all just copied for each
             # sample along the ray. So here I'm just taking the first one.
@@ -368,24 +396,36 @@ class RENINeuSModel(NeuSModel):
 
             # update origin based on p2p distance (expected termination depth)
             # this is our sample we think has hit the object
-            if self.use_visibility == "sdf":
-                origins += ray_directions * p2p_dist.unsqueeze(-1)
-            elif self.use_visibility == "sphere_tracing":
-                origins += ray_directions * p2p_dist.unsqueeze(-1)
+            origins += ray_directions * p2p_dist.unsqueeze(-1)
 
             # TODO do we need to shift the origin slightly in the direction of illumination direction out of the NeuS density that anneals over training?
 
-            num_subset_rays = origins.shape[0]
-            num_directions = illumination_directions.shape[0]
+            origins = origins.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 3]
+            directions = (
+                illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 3]
 
-            origins = origins.repeat_interleave(num_directions, dim=1)
-            directions = illumination_directions.unsqueeze(0).unsqueeze(2).repeat(num_subset_rays, 1, 1, 1)
+            # move all the origins 0.1 units in the direction of the illumination direction
+            # origins = origins + directions * 0.1  # TODO function of NeuS density?
 
-            pixel_areas = pixel_areas.repeat_interleave(num_directions, dim=1)
-            camera_indices = camera_indices.repeat_interleave(num_directions, dim=1)
-            nears = nears.unsqueeze(1).unsqueeze(2).repeat_interleave(num_directions, dim=1)
-            fars = fars.unsqueeze(1).unsqueeze(2).repeat_interleave(num_directions, dim=1)
-            directions_norm = directions_norm.repeat_interleave(num_directions, dim=1)
+            pixel_areas = pixel_areas.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 1]
+            camera_indices = camera_indices.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 1]
+            nears = (
+                nears.unsqueeze(1).unsqueeze(2).repeat(1, illumination_directions.shape[0], 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 1]
+            fars = (
+                fars.unsqueeze(1).unsqueeze(2).repeat(1, illumination_directions.shape[0], 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 1]
+
+            directions_norm = directions_norm.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_subset_rays, num_directions, 1, 1]
 
             visibility_ray_bundle = RayBundle(
                 origins=origins.reshape(-1, 3),
@@ -396,8 +436,6 @@ class RENINeuSModel(NeuSModel):
                 nears=nears.reshape(-1, 1),
                 fars=fars.reshape(-1, 1),
             )
-            # generate samples from proposal network
-
             if self.use_visibility == "sdf":
                 ray_samples_vis, _, _ = self.proposal_sampler(
                     visibility_ray_bundle, density_fns=self.density_fns
@@ -471,7 +509,6 @@ class RENINeuSModel(NeuSModel):
                 sdf = sdf.reshape(origins.shape[0], origins.shape[1], 1, 1)
                 sdf = torch.clamp(sdf, max=0.0) * 4.0
 
-                print("sdf", sdf.shape, "origins", origins.shape, "ray_directions", ray_directions.shape)
                 origins = origins + sdf * ray_directions
 
                 # Sphere tracing loop
@@ -501,6 +538,70 @@ class RENINeuSModel(NeuSModel):
                 )  # [num_rays, samples_per_ray, num_directions]
                 visibility = visibility.reshape(-1, visibility.shape[2])  # [num_rays*samples_per_ray, num_directions]
                 samples_and_field_outputs["sky_visibility_sample"] = visibility
+        elif self.use_visibility == "mlp":
+            num_rays = ray_samples.shape[0]
+            num_samples = ray_samples.shape[1]
+            num_illumination_directions = illumination_directions.shape[0]
+
+            ray_samples_camera = ray_samples[:, 0:1] # [num_rays, 1]
+            sky_visibility_camera_ray, sky_termination_camera_ray = self.field.forward_visibility(ray_samples_camera)
+
+            # now build ray_sample for illumination direction, we only want to do this at expected termaintion depth
+            # to save on compute, just copy it for all samples along ray after
+            origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            # update origin based on p2p distance (expected termination depth)
+            # this is our sample we think has hit the object
+            origins += ray_directions * p2p_dist.unsqueeze(-1)
+
+            origins = origins.unsqueeze(1).repeat(
+                1, num_illumination_directions, 1, 1
+            )  # [num_subset_rays, num_directions, 1, 3]
+            directions = (
+                illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
+            )  # [num_subset_rays, num_directions, 1, 3]
+
+            ray_samples_illumination = ray_samples
+            ray_samples_illumination.frustums.origins = origins.view(-1, 3)
+            ray_samples_illumination.frustums.directions = directions.view(-1, 3)
+
+            sky_visibility_sample, sky_termination_sample = self.field.forward_visibility(ray_samples_illumination)
+
+            samples_and_field_outputs["sky_visibility_sample"] = sky_visibility_sample
+            samples_and_field_outputs["sky_termination_sample"] = sky_termination_sample
+            samples_and_field_outputs["sky_visibility_camera_ray"] = sky_visibility_camera_ray
+            samples_and_field_outputs["sky_termination_camera_ray"] = sky_termination_camera_ray
+
+            # we need to generate an sdf for camera ray termination for loss calculation
+            # this is hopefully ensuring the visibility is correct
+            origins = ray_samples.frustums.origins.view(-1, 3)  # [num_rays*samples_per_ray, 3]
+            ray_directions = ray_samples.frustums.directions.view(-1, 3)  # [num_rays*samples_per_ray, 3]
+            sample_points = origins + ray_directions * field_outputs["sky_termination_sample"].view(
+                -1, 1
+            )  # [num_rays*samples_per_ray, 1]
+            sdf_at_camera_ray_termination = self.field.get_sdf_at_pos(sample_points)  # [num_rays*samples_per_ray, 1]
+            samples_and_field_outputs["sdf_at_camera_ray_termination"] = sdf_at_camera_ray_termination.view(
+                num_rays, num_samples, 1
+            )
+
+            # now we need to do this for the illumination rays
+            # to reduce computational demand only do points on the surface of the object (or the expected termination depth atm)
+            origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            ray_directions = ray_samples.frustums.directions[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            origins += ray_directions * p2p_dist.unsqueeze(-1) 
+            origins = origins.unsqueeze(1).repeat(
+                1, illumination_directions.shape[0], 1, 1
+            )  # [num_rays, num_directions, 1, 3]
+            directions = (
+                illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
+            )  # [num_rays, num_directions, 1, 3]
+
+            sample_points = origins + directions * field_outputs["sky_termination_sample"].view(
+
+            origins = ray_samples.frustums.origins.view(-1, 3)  # [num_rays*1, 3]
+            ray_directions = (
+                illumination_directions.view(1, -1, 3).repeat(num_rays, 1, 1).view(-1, 3)
+            )  # [num_rays*samples_per_ray, 3]
+
         else:
             visibility = torch.ones((mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])).type_as(
                 accumulation
@@ -533,10 +634,19 @@ class RENINeuSModel(NeuSModel):
         sky_visibility_camera_ray = None
         sky_visibility_sample = None
         if self.use_visibility == "mlp":
-            sky_visibility_camera_ray = field_outputs["sky_visibility_camera_ray"]
-            sky_visibility_sample = field_outputs[
+            # sky_visibility_camera_ray = field_outputs["sky_visibility_camera_ray"]
+            sky_visibility_sample = samples_and_field_outputs[
                 "sky_visibility_sample"
             ]  # [num_rays*samples_per_ray, num_illumination_directions]
+            sky_termination_sample = samples_and_field_outputs[
+                "sky_termination_sample"
+            ]  # [num_rays*samples_per_ray, num_illumination_directions, 1]
+            sky_visibility_camera_ray = samples_and_field_outputs[
+                "sky_visibility_camera_ray"
+            ]  # [num_rays*samples_per_ray, num_illumination_directions, 1]
+            sky_termination_camera_ray = samples_and_field_outputs[
+                "sky_termination_camera_ray"
+            ]  # [num_rays*samples_per_ray, num_illumination_directions, 1]
         elif self.use_visibility == "sdf":
             sky_visibility_sample = samples_and_field_outputs[
                 "sky_visibility_sample"
@@ -616,7 +726,9 @@ class RENINeuSModel(NeuSModel):
 
         if self.use_visibility == "mlp":
             outputs["visibility"] = self.renderer_accumulation(weights=sky_visibility_camera_ray)
+            outputs["sky_termination_camera_ray"] = sky_termination_camera_ray
             outputs["sky_visibility_sample"] = sky_visibility_sample
+            outputs["sky_termination_sample"] = sky_termination_sample
         elif self.use_visibility == "sdf":
             outputs["visibility"] = 1.0 - samples_and_field_outputs["accumulation"]
         elif self.use_visibility == "sphere_tracing":

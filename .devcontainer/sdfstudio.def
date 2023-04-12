@@ -34,6 +34,7 @@ Stage: spython-base
   pip install pytest
   pip install pip-system-certs
   pip install wandb --upgrade
+  pip install --upgrade jupyter-server
 
   su - 
 

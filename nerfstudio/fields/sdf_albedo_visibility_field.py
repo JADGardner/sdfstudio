@@ -33,7 +33,7 @@ from nerfstudio.field_components.encodings import (
     PeriodicVolumeEncoding,
     TensorVMEncoding,
 )
-from nerfstudio.field_components.field_heads import DensityFieldHead, FieldHeadNames
+from nerfstudio.field_components.field_heads import DensityFieldHead, FieldHeadNames, FieldHead
 from nerfstudio.field_components.spatial_distortions import SpatialDistortion
 from nerfstudio.fields.base_field import Field
 from nerfstudio.fields.sdf_field import SDFFieldConfig
@@ -279,25 +279,36 @@ class SDFAlbedoVisibilityField(Field):
             setattr(self, "clin" + str(l), lin)
 
         # explicit illumination visibility prediction
-        if self.use_visibility == "mlp":
-            self.mlp_visibility = tcnn.Network(
-                n_input_dims=3
-                + self.position_encoding.get_out_dim()
-                + self.encoding.n_output_dims
-                + self.direction_encoding.get_out_dim()
-                + self.config.geo_feat_dim,
-                n_output_dims=output_dim_visibility,
-                network_config={
-                    "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
-                    "output_activation": "None",
-                    "n_neurons": hidden_dim_visibility,
-                    "n_hidden_layers": num_layers_visibility - 1,
-                },
-            )
-            self.field_head_visibility = DensityFieldHead(
-                in_dim=self.mlp_visibility.n_output_dims, activation=torch.sigmoid
-            )
+        # if self.use_visibility == "mlp":
+        self.mlp_visibility = tcnn.Network(
+            n_input_dims=3
+            + self.position_encoding.get_out_dim()
+            + self.encoding.n_output_dims
+            + self.direction_encoding.get_out_dim(),
+            # + self.config.geo_feat_dim,
+            n_output_dims=output_dim_visibility,
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": hidden_dim_visibility,
+                "n_hidden_layers": num_layers_visibility - 1,
+            },
+        )
+        self.field_head_visibility = DensityFieldHead(
+            in_dim=self.mlp_visibility.n_output_dims, activation=torch.sigmoid
+        )
+        self.field_head_termination = FieldHead(
+            field_head_name=FieldHeadNames.TERMINATION,
+            in_dim=self.mlp_visibility.n_output_dims,
+            out_dim=1,
+            activation=torch.sigmoid,
+        )
+
+        if self.use_visibility not in ["mlp"]:
+            self.mlp_visibility.requires_grad_(False)
+            self.field_head_visibility.requires_grad_(False)
+            self.field_head_termination.requires_grad_(False)
 
         vertices, _ = icosphere.icosphere(self.icosphere_order)
         self.icosphere = torch.from_numpy(vertices).float()
@@ -344,6 +355,30 @@ class SDFAlbedoVisibilityField(Field):
             if l < self.num_layers - 2:
                 x = self.softplus(x)
         return x
+
+    def forward_visibility(self, ray_samples: RaySamples):
+        """forward the visibility network"""
+        origins = ray_samples.origins  # [num_rays*num_directions, 3] aka [K, 3]
+        positions = self.spatial_distortion(origins)
+        positions = (positions + 1.0) / 2.0
+        feature = self.encoding(positions)
+        pe = self.position_encoding(origins)
+        positions_flat = torch.cat((origins, pe, feature), dim=-1)  # [K, N]
+
+        directions = ray_samples.directions  # [num_rays*num_directions, 3] aka [K, 3]
+        directions = self.direction_encoding(directions)  # [K, 16] (SH encoding, order 4)
+
+        # final input to the visibility network
+        visibility_input = torch.cat([positions_flat, directions], dim=-1)
+
+        x = self.mlp_visibility(visibility_input)  # [K, output_dim_visibility]
+        visibility = self.field_head_visibility(x.float())
+        visibility = visibility.view(-1, visibility.shape[0], 1).squeeze()  # [K, D] aka [num_rays, num_directions]
+        termination_dist = self.field_head_termination(x.float())
+        termination_dist = termination_dist.view(
+            -1, termination_dist.shape[0], 1
+        )  # [K, D, 1] aka [num_rays, num_directions, 1]
+        return visibility, termination_dist
 
     def get_sdf(self, ray_samples: RaySamples):
         """predict the sdf value for ray samples"""
@@ -501,49 +536,57 @@ class SDFAlbedoVisibilityField(Field):
 
         albedo = self.get_albedo(positions_flat, geo_features)
 
-        sky_visibility_sample = None
-        if self.use_visibility == "mlp":
-            inputs = ray_samples.frustums.get_start_positions()
-            inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3] aka [K, 3]
-            positions = self.spatial_distortion(inputs_flat)
-            positions = (positions + 1.0) / 2.0
-            feature = self.encoding(positions)
-            pe = self.position_encoding(inputs_flat)
-            positions_flat = torch.cat((inputs_flat, pe, feature), dim=-1)
-            # directions = self.icosphere.to(positions.device)  # [D, 3]
-            directions = illumination_directions  # [D, 3]
-            directions = self.direction_encoding(directions)  # [D, 16] (SH encoding, order 4)
-            directions = directions.unsqueeze(0).repeat(positions_flat.shape[0], 1, 1)  # [K, D, 16]
-            density_emb = geo_features.view(-1, self.config.geo_feat_dim)  # [K, 15]
-            density_emb = density_emb.unsqueeze(1).repeat(1, directions.shape[1], 1)  # [K, D, 15]
-            positions_flat = positions_flat.unsqueeze(1).repeat(1, directions.shape[1], 1)  # [K, D, 3]
-            directions = directions.view(-1, directions.shape[-1])  # [K * D, 16]
-            density_emb = density_emb.view(-1, density_emb.shape[-1])  # [K * D, 15]
-            positions_flat = positions_flat.view(-1, positions_flat.shape[-1])  # [K * D, 16]
-            visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
-            x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
-            sky_visibility_sample = self.field_head_visibility(x.float())
-            sky_visibility_sample = sky_visibility_sample.view(
-                -1, sky_visibility_sample.shape[0], 1
-            ).squeeze()  # [K, D] aka [num_rays * samples_per_ray, num_illumination_directions]
+        # sky_visibility_sample = None
+        # if self.use_visibility == "mlp":
+        #     inputs = ray_samples.frustums.get_start_positions()
+        #     inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3] aka [K, 3]
+        #     positions = self.spatial_distortion(inputs_flat)
+        #     positions = (positions + 1.0) / 2.0
+        #     feature = self.encoding(positions)
+        #     pe = self.position_encoding(inputs_flat)
+        #     positions_flat = torch.cat((inputs_flat, pe, feature), dim=-1)
+        #     # directions = self.icosphere.to(positions.device)  # [D, 3]
+        #     directions = illumination_directions  # [D, 3]
+        #     directions = self.direction_encoding(directions)  # [D, 16] (SH encoding, order 4)
+        #     directions = directions.unsqueeze(0).repeat(positions_flat.shape[0], 1, 1)  # [K, D, 16]
+        #     density_emb = geo_features.view(-1, self.config.geo_feat_dim)  # [K, 15]
+        #     density_emb = density_emb.unsqueeze(1).repeat(1, directions.shape[1], 1)  # [K, D, 15]
+        #     positions_flat = positions_flat.unsqueeze(1).repeat(1, directions.shape[1], 1)  # [K, D, 3]
+        #     directions = directions.view(-1, directions.shape[-1])  # [K * D, 16]
+        #     density_emb = density_emb.view(-1, density_emb.shape[-1])  # [K * D, 15]
+        #     positions_flat = positions_flat.view(-1, positions_flat.shape[-1])  # [K * D, 16]
+        #     visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
+        #     x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
+        #     sky_visibility_sample = self.field_head_visibility(x.float())
+        #     sky_visibility_sample = sky_visibility_sample.view(
+        #         -1, sky_visibility_sample.shape[0], 1
+        #     ).squeeze()  # [K, D] aka [num_rays * samples_per_ray, num_illumination_directions]
+        #     sky_termination_sample = self.field_head_termination(x.float())
+        #     sky_termination_sample = sky_termination_sample.view(
+        #         -1, sky_termination_sample.shape[0], 1
+        #     )  # [K, D, 1] aka [num_rays * samples_per_ray, num_illumination_directions, 3]
 
-            # now for camera rays to apply loss from sky masks
-            inputs = ray_samples.frustums.get_start_positions()
-            inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3]
-            positions = self.spatial_distortion(inputs_flat)
-            positions = (positions + 1.0) / 2.0
-            feature = self.encoding(positions)
-            pe = self.position_encoding(inputs_flat)
-            positions_flat = torch.cat((inputs_flat, pe, feature), dim=-1)
+        #     # now for camera rays to apply loss from sky masks
+        #     inputs = ray_samples.frustums.get_start_positions()
+        #     inputs_flat = inputs.view(-1, 3)  # [num_rays * samples_per_ray, 3]
+        #     positions = self.spatial_distortion(inputs_flat)
+        #     positions = (positions + 1.0) / 2.0
+        #     feature = self.encoding(positions)
+        #     pe = self.position_encoding(inputs_flat)
+        #     positions_flat = torch.cat((inputs_flat, pe, feature), dim=-1)
 
-            directions = self.direction_encoding(
-                ray_samples.frustums.directions.reshape(-1, 3)
-            )  # [K, 16] (SH encoding, order 4)
-            density_emb = geo_features.view(-1, self.config.geo_feat_dim)  # [K, 15]
-            visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
-            x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
-            sky_visibility_camera_ray = self.field_head_visibility(x.float())
-            sky_visibility_camera_ray = sky_visibility_camera_ray.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
+        #     directions = self.direction_encoding(
+        #         ray_samples.frustums.directions.reshape(-1, 3)
+        #     )  # [K, 16] (SH encoding, order 4)
+        #     density_emb = geo_features.view(-1, self.config.geo_feat_dim)  # [K, 15]
+        #     visibility_input = torch.cat([positions_flat, directions, density_emb], dim=-1)
+        #     x = self.mlp_visibility(visibility_input)  # [K * D, output_dim_visibility]
+        #     sky_visibility_camera_ray = self.field_head_visibility(x.float())
+        #     sky_visibility_camera_ray = sky_visibility_camera_ray.view(inputs.shape[0], inputs.shape[1], 1)  # [K, D, 1]
+        #     sky_termination_camera_ray = self.field_head_termination(x.float())
+        #     sky_termination_camera_ray = sky_termination_camera_ray.view(
+        #         inputs.shape[0], inputs.shape[1], 1
+        #     )  # [K, D, 1]
 
         albedo = albedo.view(*ray_samples.frustums.directions.shape[:-1], -1)
 
@@ -566,9 +609,11 @@ class SDFAlbedoVisibilityField(Field):
             occupancy = self.get_occupancy(sdf)
             outputs.update({FieldHeadNames.OCCUPANCY: occupancy})
 
-        if self.use_visibility == "mlp":
-            outputs.update({"sky_visibility_sample": sky_visibility_sample})
-            outputs.update({"sky_visibility_camera_ray": sky_visibility_camera_ray})
+        # if self.use_visibility == "mlp":
+        #     outputs.update({"sky_visibility_sample": sky_visibility_sample})
+        #     outputs.update({"sky_termination_sample": sky_termination_sample})
+        #     outputs.update({"sky_visibility_camera_ray": sky_visibility_camera_ray})
+        #     outputs.update({"sky_termination_camera_ray": sky_termination_camera_ray})
 
         return outputs
 

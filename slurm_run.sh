@@ -1,9 +1,20 @@
 #!/bin/bash
+#SBATCH --job-name=sdfstudio                   # Job name
+#SBATCH --mail-type=END,FAIL                   # Mail events (NONE, BEGIN, END, FAIL, ALL)
+#SBATCH --mail-user=james.gardner@york.ac.uk   # Where to send mail
+#SBATCH --ntasks=1                             # Run a single task...
+#SBATCH --cpus-per-task=16                     # ...with a single CPU
+#SBATCH --mem=24gb                             # Job memory request
+#SBATCH --time=06:00:00                        # Time limit hrs:min:sec
+#SBATCH --output=outputs/SLURM/cuda_job_%j.log # Standard output and error log
+#SBATCH --partition=gpu                        # Select the GPU nodes...
+#SBATCH --gres=gpu:1                           # ...and the Number of GPUs
+
 module purge # clear any inherited modules
 
 export CUDA_VISIBLE_DEVICES=1
  
-echo `date`: executing sdfstudio/run.sh on host $HOSTNAME
+echo `date`: executing sdfstudio/run.sh on host $HOSTNAME with $SLURM_CPUS_ON_NODE cpu cores
 echo
 cudaDevs=$(echo $CUDA_VISIBLE_DEVICES | sed -e 's/,/ /g')
 echo I can see GPU devices $CUDA_VISIBLE_DEVICES

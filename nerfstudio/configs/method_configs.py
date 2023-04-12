@@ -128,15 +128,18 @@ method_configs["neus-facto"] = Config(
         model=NeuSFactoModelConfig(
             sdf_field=SDFFieldConfig(
                 use_grid_feature=True,
-                num_layers=2,
-                num_layers_color=2,
+                num_layers=5,
+                num_layers_color=5,
                 hidden_dim=256,
                 bias=0.5,
                 beta_init=0.3,
-                use_appearance_embedding=False,
+                use_appearance_embedding=True,
+                inside_outside=False,
             ),
-            background_model="none",
+            background_model="mlp",
             eval_num_rays_per_chunk=1024,
+            near_plane=0.05,
+            far_plane=4.0,
         ),
     ),
     optimizers={
@@ -880,8 +883,8 @@ method_configs["RENI-NeuS"] = Config(
         steps_per_eval_all_images=1000000,  # set to a very large model so we don't eval with all images
         max_num_iterations=120001,
         mixed_precision=False,
-        load_dir="outputs/data-NeRF-OSR-Data/RENI-NeuS/latest_with_rot_and_clip_illumination/sdfstudio_models",
-        load_step=100000,
+        # load_dir="outputs/data-NeRF-OSR-Data/RENI-NeuS/latest_with_rot_and_clip_illumination/sdfstudio_models",
+        # load_step=100000,
     ),
     pipeline=FitEvalLatentsPipelineConfig(
         datamanager=VanillaDataManagerConfig(
@@ -905,7 +908,7 @@ method_configs["RENI-NeuS"] = Config(
                 beta_init=0.3,
                 use_appearance_embedding=False,
                 inside_outside=False,  # False is for outdoor scenes
-                use_visibility="sdf",
+                use_visibility="none",
             ),
             eval_num_rays_per_chunk=256,
             fg_mask_loss_mult=1.0,
@@ -921,7 +924,7 @@ method_configs["RENI-NeuS"] = Config(
             use_average_appearance_embedding=False,
             icosphere_order=11,
             illumination_sampler_random_rotation=True,
-            illumination_sample_remove_lower_hemisphere=True,
+            illumination_sample_remove_lower_hemisphere=False,
         ),
         eval_latent_optimisation_source="image_half_inverse",
         eval_latent_optimisation_epochs=50,
