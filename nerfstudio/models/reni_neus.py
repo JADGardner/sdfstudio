@@ -220,32 +220,6 @@ class RENINeuSModel(NeuSModel):
             update_sched=update_schedule,
         )
 
-        if self.use_visibility == "mlp":
-            self.mlp_visibility = tcnn.Network(
-                n_input_dims=3
-                + self.position_encoding.get_out_dim()
-                + self.encoding.n_output_dims
-                + self.direction_encoding.get_out_dim()
-                + self.config.geo_feat_dim,
-                n_output_dims=output_dim_visibility,
-                network_config={
-                    "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
-                    "output_activation": "None",
-                    "n_neurons": hidden_dim_visibility,
-                    "n_hidden_layers": num_layers_visibility - 1,
-                },
-            )
-            self.field_head_visibility = DensityFieldHead(
-                in_dim=self.mlp_visibility.n_output_dims, activation=torch.sigmoid
-            )
-            self.field_head_termination = FieldHead(
-                field_head_name=FieldHeadNames.TERMINATION,
-                in_dim=self.mlp_visibility.n_output_dims,
-                out_dim=1,
-                activation=torch.sigmoid,
-            )
-
         self.albedo_renderer = RGBRenderer(background_color=torch.tensor([1.0, 1.0, 1.0]))
         self.lambertian_renderer = RGBLambertianRendererWithVisibility()
 
@@ -543,12 +517,15 @@ class RENINeuSModel(NeuSModel):
             num_samples = ray_samples.shape[1]
             num_illumination_directions = illumination_directions.shape[0]
 
-            ray_samples_camera = ray_samples[:, 0:1] # [num_rays, 1]
-            sky_visibility_camera_ray, sky_termination_camera_ray = self.field.forward_visibility(ray_samples_camera)
+            ray_samples_camera = ray_samples[:, 0]  # [num_rays]
+            sky_visibility_camera_ray, pred_termination_camera_ray = self.field.forward_visibility(ray_samples_camera)
+            # scale predicted termination depth by near and far plane
+            pred_termination_camera_ray = pred_termination_camera_ray * (self.far - self.near) + self.near
 
             # now build ray_sample for illumination direction, we only want to do this at expected termaintion depth
             # to save on compute, just copy it for all samples along ray after
-            origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_rays, 1, 3]
+            ray_directions = ray_samples.frustums.directions[:, 0:1, :]  # [num_rays, 1, 3]
             # update origin based on p2p distance (expected termination depth)
             # this is our sample we think has hit the object
             origins += ray_directions * p2p_dist.unsqueeze(-1)
@@ -565,49 +542,78 @@ class RENINeuSModel(NeuSModel):
             ray_samples_illumination.frustums.directions = directions.view(-1, 3)
 
             sky_visibility_sample, sky_termination_sample = self.field.forward_visibility(ray_samples_illumination)
+            # scale predicted termination depth by near and far plane
+            sky_termination_sample = sky_termination_sample * (self.far - self.near) + self.near
+
+            # Get SDF for each sample to use as loss, first camera rays
+            origins = ray_samples.frustums.origins[:, 0:1, :]
+            origins += ray_directions * pred_termination_camera_ray
+            sdf_at_camera_ray_termination = self.field.get_sdf_at_pos(origins)
+
+            # reshape sky_visibility_sample to be [num_rays*num_samples, num_illumination_directions] by
+            # repeating the visibility for each sample along the ray
+            sky_visibility_sample = sky_visibility_sample.reshape(
+                num_rays, num_illumination_directions, 1
+            )  # [num_subset_rays, num_directions, 1]
+            sky_visibility_sample = sky_visibility_sample.unsqueeze(1).repeat(
+                1, num_samples, 1, 1
+            )  # [num_rays, samples_per_ray, num_directions, 1]
+            sky_visibility_sample = sky_visibility_sample.reshape(
+                -1, num_illumination_directions
+            )  # [num_rays*samples_per_ray, num_directions]
+
+            sky_termination_sample = sky_termination_sample.reshape(
+                num_rays, num_illumination_directions, 1
+            )  # [num_subset_rays, num_directions, 1]
+            sky_termination_sample = sky_termination_sample.unsqueeze(1).repeat(
+                1, num_samples, 1, 1
+            )  # [num_rays, samples_per_ray, num_directions, 1]
+            sky_termination_sample = sky_termination_sample.reshape(
+                -1, num_illumination_directions, 1
+            )  # [num_rays*samples_per_ray, num_directions, 1]
 
             samples_and_field_outputs["sky_visibility_sample"] = sky_visibility_sample
             samples_and_field_outputs["sky_termination_sample"] = sky_termination_sample
             samples_and_field_outputs["sky_visibility_camera_ray"] = sky_visibility_camera_ray
             samples_and_field_outputs["sky_termination_camera_ray"] = sky_termination_camera_ray
 
-            # we need to generate an sdf for camera ray termination for loss calculation
-            # this is hopefully ensuring the visibility is correct
-            origins = ray_samples.frustums.origins.view(-1, 3)  # [num_rays*samples_per_ray, 3]
-            ray_directions = ray_samples.frustums.directions.view(-1, 3)  # [num_rays*samples_per_ray, 3]
-            sample_points = origins + ray_directions * field_outputs["sky_termination_sample"].view(
-                -1, 1
-            )  # [num_rays*samples_per_ray, 1]
-            sdf_at_camera_ray_termination = self.field.get_sdf_at_pos(sample_points)  # [num_rays*samples_per_ray, 1]
-            samples_and_field_outputs["sdf_at_camera_ray_termination"] = sdf_at_camera_ray_termination.view(
-                num_rays, num_samples, 1
-            )
+            # # we need to generate an sdf for camera ray termination for loss calculation
+            # # this is hopefully ensuring the visibility is correct
+            # origins = ray_samples.frustums.origins.view(-1, 3)  # [num_rays*samples_per_ray, 3]
+            # ray_directions = ray_samples.frustums.directions.view(-1, 3)  # [num_rays*samples_per_ray, 3]
+            # sample_points = origins + ray_directions * field_outputs["sky_termination_sample"].view(
+            #     -1, 1
+            # )  # [num_rays*samples_per_ray, 1]
+            # sdf_at_camera_ray_termination = self.field.get_sdf_at_pos(sample_points)  # [num_rays*samples_per_ray, 1]
+            # samples_and_field_outputs["sdf_at_camera_ray_termination"] = sdf_at_camera_ray_termination.view(
+            #     num_rays, num_samples, 1
+            # )
 
-            # now we need to do this for the illumination rays
-            # to reduce computational demand only do points on the surface of the object (or the expected termination depth atm)
-            origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_subset_rays, 1, 3]
-            ray_directions = ray_samples.frustums.directions[:, 0:1, :]  # [num_subset_rays, 1, 3]
-            origins += ray_directions * p2p_dist.unsqueeze(-1) 
-            origins = origins.unsqueeze(1).repeat(
-                1, illumination_directions.shape[0], 1, 1
-            )  # [num_rays, num_directions, 1, 3]
-            directions = (
-                illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
-            )  # [num_rays, num_directions, 1, 3]
+            # # now we need to do this for the illumination rays
+            # # to reduce computational demand only do points on the surface of the object (or the expected termination depth atm)
+            # origins = ray_samples.frustums.origins[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            # ray_directions = ray_samples.frustums.directions[:, 0:1, :]  # [num_subset_rays, 1, 3]
+            # origins += ray_directions * p2p_dist.unsqueeze(-1)
+            # origins = origins.unsqueeze(1).repeat(
+            #     1, illumination_directions.shape[0], 1, 1
+            # )  # [num_rays, num_directions, 1, 3]
+            # directions = (
+            #     illumination_directions.unsqueeze(0).unsqueeze(2).repeat(origins.shape[0], 1, 1, 1)
+            # )  # [num_rays, num_directions, 1, 3]
 
-            sample_points = origins + directions * field_outputs["sky_termination_sample"].view(
+            # sample_points = origins + directions * field_outputs["sky_termination_sample"].view(
 
-            origins = ray_samples.frustums.origins.view(-1, 3)  # [num_rays*1, 3]
-            ray_directions = (
-                illumination_directions.view(1, -1, 3).repeat(num_rays, 1, 1).view(-1, 3)
-            )  # [num_rays*samples_per_ray, 3]
+            # origins = ray_samples.frustums.origins.view(-1, 3)  # [num_rays*1, 3]
+            # ray_directions = (
+            #     illumination_directions.view(1, -1, 3).repeat(num_rays, 1, 1).view(-1, 3)
+            # )  # [num_rays*samples_per_ray, 3]
 
-        else:
-            visibility = torch.ones((mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])).type_as(
-                accumulation
-            )  # [num_rays * samples_per_ray, num_directions]
-            samples_and_field_outputs["sky_visibility_sample"] = visibility
-            return samples_and_field_outputs
+        # else:
+        #     visibility = torch.ones((mask.shape[0] * ray_samples.shape[1], illumination_directions.shape[0])).type_as(
+        #         accumulation
+        #     )  # [num_rays * samples_per_ray, num_directions]
+        #     samples_and_field_outputs["sky_visibility_sample"] = visibility
+        #     return samples_and_field_outputs
 
         return samples_and_field_outputs
 
@@ -643,10 +649,10 @@ class RENINeuSModel(NeuSModel):
             ]  # [num_rays*samples_per_ray, num_illumination_directions, 1]
             sky_visibility_camera_ray = samples_and_field_outputs[
                 "sky_visibility_camera_ray"
-            ]  # [num_rays*samples_per_ray, num_illumination_directions, 1]
+            ]  # [num_rays*samples_per_ray, 1, 1]
             sky_termination_camera_ray = samples_and_field_outputs[
                 "sky_termination_camera_ray"
-            ]  # [num_rays*samples_per_ray, num_illumination_directions, 1]
+            ]  # [num_rays*samples_per_ray, 1, 1]
         elif self.use_visibility == "sdf":
             sky_visibility_sample = samples_and_field_outputs[
                 "sky_visibility_sample"

@@ -98,13 +98,17 @@
                "--masks-from-semantics", "True"]
     },
     {
-      "name": "Python: train RENI-NeuS nerf-osr with semantics",
+      "name": "Python: train RENI-NeuS nerf-osr with vis mlp",
       "type": "python",
       "request": "launch",
       "program": "scripts/train.py",
       "console": "integratedTerminal",
       "args": ["RENI-NeuS",
-               "nerfosr-data"]
+              "--pipeline.model.sdf_field.use_visibility", "mlp",
+               "--vis", "tensorboard",
+               "nerfosr-data",
+               "--scene", "lk2",
+               "--use-session-data", "False"]
     },
     {
       "name": "Python: train RENI-Nerfacto nerf-osr with semantics",

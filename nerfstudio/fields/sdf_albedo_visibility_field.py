@@ -279,36 +279,36 @@ class SDFAlbedoVisibilityField(Field):
             setattr(self, "clin" + str(l), lin)
 
         # explicit illumination visibility prediction
-        # if self.use_visibility == "mlp":
-        self.mlp_visibility = tcnn.Network(
-            n_input_dims=3
-            + self.position_encoding.get_out_dim()
-            + self.encoding.n_output_dims
-            + self.direction_encoding.get_out_dim(),
-            # + self.config.geo_feat_dim,
-            n_output_dims=output_dim_visibility,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": hidden_dim_visibility,
-                "n_hidden_layers": num_layers_visibility - 1,
-            },
-        )
-        self.field_head_visibility = DensityFieldHead(
-            in_dim=self.mlp_visibility.n_output_dims, activation=torch.sigmoid
-        )
-        self.field_head_termination = FieldHead(
-            field_head_name=FieldHeadNames.TERMINATION,
-            in_dim=self.mlp_visibility.n_output_dims,
-            out_dim=1,
-            activation=torch.sigmoid,
-        )
+        if self.use_visibility == "mlp":
+            self.mlp_visibility = tcnn.Network(
+                n_input_dims=3
+                + self.position_encoding.get_out_dim()
+                + self.encoding.n_output_dims
+                + self.direction_encoding.get_out_dim(),
+                # + self.config.geo_feat_dim,
+                n_output_dims=output_dim_visibility,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": hidden_dim_visibility,
+                    "n_hidden_layers": num_layers_visibility - 1,
+                },
+            )
+            self.field_head_visibility = DensityFieldHead(
+                in_dim=self.mlp_visibility.n_output_dims, activation=torch.sigmoid
+            )
+            self.field_head_termination = FieldHead(
+                field_head_name=FieldHeadNames.TERMINATION,
+                in_dim=self.mlp_visibility.n_output_dims,
+                out_dim=1,
+                activation=torch.sigmoid,
+            )
 
-        if self.use_visibility not in ["mlp"]:
-            self.mlp_visibility.requires_grad_(False)
-            self.field_head_visibility.requires_grad_(False)
-            self.field_head_termination.requires_grad_(False)
+            if self.use_visibility not in ["mlp"]:
+                self.mlp_visibility.requires_grad_(False)
+                self.field_head_visibility.requires_grad_(False)
+                self.field_head_termination.requires_grad_(False)
 
         vertices, _ = icosphere.icosphere(self.icosphere_order)
         self.icosphere = torch.from_numpy(vertices).float()
@@ -358,26 +358,24 @@ class SDFAlbedoVisibilityField(Field):
 
     def forward_visibility(self, ray_samples: RaySamples):
         """forward the visibility network"""
-        origins = ray_samples.origins  # [num_rays*num_directions, 3] aka [K, 3]
+        origins = ray_samples.frustums.origins  # [num_rays * num_directions, 3]
+        origins = origins.view(-1, 3)  # [K, 3]
         positions = self.spatial_distortion(origins)
         positions = (positions + 1.0) / 2.0
         feature = self.encoding(positions)
         pe = self.position_encoding(origins)
         positions_flat = torch.cat((origins, pe, feature), dim=-1)  # [K, N]
 
-        directions = ray_samples.directions  # [num_rays*num_directions, 3] aka [K, 3]
+        directions = ray_samples.frustums.directions  # [num_rays * num_directions, 3] aka [K, 3]
+        directions = directions.view(-1, 3)  # [K, 3]
         directions = self.direction_encoding(directions)  # [K, 16] (SH encoding, order 4)
 
         # final input to the visibility network
         visibility_input = torch.cat([positions_flat, directions], dim=-1)
 
         x = self.mlp_visibility(visibility_input)  # [K, output_dim_visibility]
-        visibility = self.field_head_visibility(x.float())
-        visibility = visibility.view(-1, visibility.shape[0], 1).squeeze()  # [K, D] aka [num_rays, num_directions]
+        visibility = self.field_head_visibility(x.float())  # [K, 1]
         termination_dist = self.field_head_termination(x.float())
-        termination_dist = termination_dist.view(
-            -1, termination_dist.shape[0], 1
-        )  # [K, D, 1] aka [num_rays, num_directions, 1]
         return visibility, termination_dist
 
     def get_sdf(self, ray_samples: RaySamples):
